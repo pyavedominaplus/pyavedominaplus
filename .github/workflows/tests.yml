@@ -37,5 +37,5 @@ jobs:
 
       - name: Run tests
         run: |
-          pytest tests/ --cov=pyavedominaplus --cov-report=xml
+          pytest tests/ --cov=pyavedominaplus --cov-report=term
 
