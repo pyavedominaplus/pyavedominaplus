@@ -36,7 +36,12 @@ Issues = "https://github.com/pyavedominaplus/pyavedominaplus/issues"
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.23",
-    "pytest-cov",
+    "pytest-cov>=4.0",
+    "coverage>=7.0",
+    "black>=24.0",
+    "ruff>=0.1.0",
+    "build>=1.0",
+    "twine>=4.0",
 ]
 
 [tool.pytest.ini_options]
