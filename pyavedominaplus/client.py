@@ -199,8 +199,8 @@ class AVEDominaClient:
         await self.send_command("WSC", [device_id, "0"])
 
     async def set_dimmer_level(self, device_id: str, level: int) -> None:
-        """Set a dimmer to a specific level (0-254)."""
-        level = max(0, min(254, level))
+        """Set a dimmer to a specific level (0-31)."""
+        level = max(0, min(31, level))
         await self.send_command(CMD_SET_DIMMER_LEVEL, [device_id, str(level)])
 
     async def open_shutter(self, device_id: str) -> None:

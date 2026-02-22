@@ -187,10 +187,10 @@ class TestConvenienceEncoders:
 
     def test_encode_dimmer_level(self):
         """Test dimmer level encoding."""
-        msg = encode_set_dimmer_level("101", 127)
+        msg = encode_set_dimmer_level("101", 31)
         decoded = decode_message(msg)
         assert decoded[0]["command"] == "SIL"
-        assert decoded[0]["parameters"] == ["101", "127"]
+        assert decoded[0]["parameters"] == ["101", "31"]
 
     def test_encode_thermostat_set_point(self):
         """Test thermostat set point encoding."""

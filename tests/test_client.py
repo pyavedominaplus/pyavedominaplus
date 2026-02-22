@@ -131,10 +131,10 @@ class TestClientDeviceControl:
         await client.initialize()
         await client.wait_for_initialization(timeout=5.0)
 
-        await client.set_dimmer_level("101", 127)
+        await client.set_dimmer_level("101", 31)
         await asyncio.sleep(0.2)
 
-        assert mock_server.device_statuses["101"] == 127
+        assert mock_server.device_statuses["101"] == 31
 
     async def test_dimmer_level_clamped(self, client, mock_server):
         """Test that dimmer level is clamped to 0-254."""
@@ -143,7 +143,7 @@ class TestClientDeviceControl:
 
         await client.set_dimmer_level("101", 300)
         await asyncio.sleep(0.2)
-        assert mock_server.device_statuses["101"] == 254
+        assert mock_server.device_statuses["101"] == 31
 
     async def test_open_shutter(self, client, mock_server):
         """Test opening a shutter."""

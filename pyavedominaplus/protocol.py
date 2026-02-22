@@ -110,7 +110,7 @@ def encode_set_dimmer_level(device_id: str, level: int) -> bytes:
     """Encode a dimmer level command.
 
     Sends: SIL + GS + device_id + GS + level
-    Level is 0-254.
+    Level is 0-31.
     """
     return encode_message("SIL", [device_id, str(level)])
 

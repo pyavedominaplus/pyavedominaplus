@@ -93,9 +93,9 @@ class TestDominaDevice:
 
     def test_brightness_dimmer(self):
         dev = DominaDevice(
-            id="101", name="Dimmer", device_type=DEVICE_TYPE_DIMMER, current_value=127
+            id="101", name="Dimmer", device_type=DEVICE_TYPE_DIMMER, current_value=31
         )
-        assert dev.brightness == 127
+        assert dev.brightness == 31
 
     def test_brightness_light(self):
         dev = DominaDevice(
