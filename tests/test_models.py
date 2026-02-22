@@ -1,6 +1,5 @@
 """Tests for AVE DominaPlus data models."""
 
-
 from pyavedominaplus.models import (
     DominaArea,
     DominaDevice,

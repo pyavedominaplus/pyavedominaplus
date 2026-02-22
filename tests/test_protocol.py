@@ -1,6 +1,5 @@
 """Tests for AVE DominaPlus protocol encoding/decoding."""
 
-
 from pyavedominaplus.const import STX, ETX, EOT, GS, RS
 from pyavedominaplus.protocol import (
     build_crc,

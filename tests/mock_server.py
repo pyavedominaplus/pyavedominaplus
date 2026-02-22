@@ -1,6 +1,5 @@
 """Mock AVE DominaPlus WebSocket server for testing."""
 
-
 from aiohttp import web, WSMsgType
 
 from pyavedominaplus.protocol import decode_message, encode_message
