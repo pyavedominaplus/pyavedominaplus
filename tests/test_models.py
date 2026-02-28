@@ -67,6 +67,61 @@ class TestDominaDevice:
         assert dev.is_shutter
         assert dev.app_type == APP_TYPE_SHUTTER
 
+    def test_shutter_is_open(self):
+        dev = DominaDevice(
+            id="102", name="Window", device_type=DEVICE_TYPE_SHUTTER, current_value=1
+        )
+        assert dev.is_open
+        assert not dev.is_opening
+        assert not dev.is_closing
+        assert not dev.is_closed
+
+    def test_shutter_is_opening(self):
+        dev = DominaDevice(
+            id="102",
+            name="Window",
+            device_type=DEVICE_TYPE_SHUTTER,
+            current_value=2,
+        )
+        assert not dev.is_open
+        assert dev.is_opening
+        assert not dev.is_closing
+        assert not dev.is_closed
+
+    def test_shutter_is_closed(self):
+        dev = DominaDevice(
+            id="102",
+            name="Window",
+            device_type=DEVICE_TYPE_SHUTTER,
+            current_value=3,
+        )
+        assert not dev.is_open
+        assert not dev.is_opening
+        assert not dev.is_closing
+        assert dev.is_closed
+
+    def test_shutter_is_closing(self):
+        dev = DominaDevice(
+            id="102",
+            name="Window",
+            device_type=DEVICE_TYPE_SHUTTER,
+            current_value=4,
+        )
+        assert not dev.is_open
+        assert not dev.is_opening
+        assert dev.is_closing
+        assert not dev.is_closed
+
+    def test_shutter_states_non_shutter_devices(self):
+        # Test that shutter state properties return False for non-shutter devices
+        dev = DominaDevice(
+            id="100", name="Light", device_type=DEVICE_TYPE_LIGHT, current_value=1
+        )
+        assert not dev.is_open
+        assert not dev.is_opening
+        assert not dev.is_closing
+        assert not dev.is_closed
+
     def test_thermostat_device(self):
         dev = DominaDevice(
             id="103", name="Thermostat", device_type=DEVICE_TYPE_THERMOSTAT
@@ -101,7 +156,7 @@ class TestDominaDevice:
         dev = DominaDevice(
             id="100", name="Light", device_type=DEVICE_TYPE_LIGHT, current_value=1
         )
-        assert dev.brightness == 254  # Full brightness when on
+        assert dev.brightness == 31  # Full brightness when on
 
     def test_brightness_light_off(self):
         dev = DominaDevice(

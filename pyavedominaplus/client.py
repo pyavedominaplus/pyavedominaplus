@@ -143,12 +143,14 @@ class AVEDominaClient:
             protocols=["binary", "base64"],
             timeout=aiohttp.ClientWSTimeout(ws_close=10.0),
         )
+        _LOGGER.debug("Connected successfully")
         self._running = True
         self._notify_connection(CONN_STATUS_OPEN)
         self._listen_task = asyncio.ensure_future(self._listen_loop())
 
     async def disconnect(self) -> None:
         """Disconnect from the server."""
+        _LOGGER.debug("Disconnecting from %s", self.url)
         self._running = False
         if self._listen_task:
             self._listen_task.cancel()
@@ -163,6 +165,7 @@ class AVEDominaClient:
         if self._owns_session and self._session and not self._session.closed:
             await self._session.close()
             self._session = None
+        _LOGGER.debug("Disconnected")
         self._notify_connection(CONN_STATUS_CLOSE)
 
     async def send_command(
@@ -175,6 +178,12 @@ class AVEDominaClient:
         if not self.connected:
             raise ConnectionError("Not connected to DominaPlus server")
         msg = encode_message(command, parameters, records)
+        _LOGGER.debug(
+            "Sending command: %s, params=%s, data=%s",
+            command,
+            parameters or [],
+            msg.hex(),
+        )
         await self._ws.send_bytes(msg)
 
     async def initialize(self) -> None:
@@ -254,18 +263,23 @@ class AVEDominaClient:
                     break
                 if ws_msg.type == aiohttp.WSMsgType.BINARY:
                     raw = ws_msg.data
+                    _LOGGER.debug("Received binary: %s", raw.hex())
                 elif ws_msg.type == aiohttp.WSMsgType.TEXT:
                     raw = ws_msg.data.encode("utf-8")
+                    _LOGGER.debug("Received text: %s", ws_msg.data)
                 elif ws_msg.type in (
                     aiohttp.WSMsgType.CLOSED,
                     aiohttp.WSMsgType.CLOSING,
                     aiohttp.WSMsgType.ERROR,
                 ):
+                    _LOGGER.debug("WebSocket closed or error: %s", ws_msg.type)
                     break
                 else:
+                    _LOGGER.debug("Ignoring message type: %s", ws_msg.type)
                     continue
                 try:
                     messages = decode_message(raw)
+                    _LOGGER.debug("Decoded %d message(s)", len(messages))
                     for msg in messages:
                         await self._handle_message(msg)
                 except Exception:
@@ -284,6 +298,13 @@ class AVEDominaClient:
         parameters = msg["parameters"]
         records = msg["records"]
 
+        _LOGGER.debug(
+            "Handling message: command=%s, params=%s, records=%d",
+            command,
+            parameters,
+            len(records),
+        )
+
         handler = {
             "lm": self._handle_lm,
             "ldi": self._handle_ldi,
@@ -298,6 +319,8 @@ class AVEDominaClient:
 
         if handler:
             await handler(parameters, records)
+        else:
+            _LOGGER.debug("No handler for command: %s", command)
 
     async def _handle_lm(self, parameters: list[str], records: list[list[str]]) -> None:
         """Handle LM (list maps/areas) response."""

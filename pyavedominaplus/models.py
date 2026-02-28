@@ -16,6 +16,10 @@ from .const import (
     DEVICE_TYPE_SCENARIO,
     DEVICE_TYPE_ENERGY,
     DEVICE_TYPE_TO_APP_TYPE,
+    SHUTTER_STATUS_OPEN,
+    SHUTTER_STATUS_OPENING,
+    SHUTTER_STATUS_CLOSED,
+    SHUTTER_STATUS_CLOSING,
 )
 
 
@@ -99,9 +103,29 @@ class DominaDevice:
         return self.current_value > 0
 
     @property
+    def is_opening(self) -> bool:
+        """Return True if shutter is opening (status 2)."""
+        return self.is_shutter and self.current_value == SHUTTER_STATUS_OPENING
+
+    @property
+    def is_open(self) -> bool:
+        """Return True if shutter is open (status 1)."""
+        return self.is_shutter and self.current_value == SHUTTER_STATUS_OPEN
+
+    @property
+    def is_closing(self) -> bool:
+        """Return True if shutter is closing (status 4)."""
+        return self.is_shutter and self.current_value == SHUTTER_STATUS_CLOSING
+
+    @property
+    def is_closed(self) -> bool:
+        """Return True if shutter is closed (status 3)."""
+        return self.is_shutter and self.current_value == SHUTTER_STATUS_CLOSED
+
+    @property
     def brightness(self) -> int:
-        """Return the brightness level (0-254) for dimmers."""
-        return self.current_value if self.is_dimmer else (254 if self.is_on else 0)
+        """Return the brightness level (0-31) for dimmers."""
+        return self.current_value if self.is_dimmer else (31 if self.is_on else 0)
 
     def update_status(self, value: int) -> None:
         """Update the device status value."""

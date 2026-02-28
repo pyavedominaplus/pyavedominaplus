@@ -16,7 +16,7 @@ AI Disclaimer: This project was built using the assistance of Claude Code
 | Device type | HA platform | Controls |
 |---|---|---|
 | Light | `light` | On/off |
-| Dimmer | `light` | On/off, brightness (0-254) |
+| Dimmer | `light` | On/off, brightness (0-31) |
 | Shutter | `cover` | Open, close, stop |
 | Thermostat | `climate` | Temperature setpoint, season mode, fan |
 | Scenario | `switch` | Activate |
