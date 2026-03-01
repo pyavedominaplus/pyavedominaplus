@@ -260,7 +260,11 @@ class AVEDominaClient:
         thermo = self._thermostats.get(device_id)
         if not thermo:
             return
-        cmd = CMD_THERMOSTAT_SET_OFF_TS01 if thermo.is_vmc_daikin else CMD_THERMOSTAT_SET_OFF
+        cmd = (
+            CMD_THERMOSTAT_SET_OFF_TS01
+            if thermo.is_vmc_daikin
+            else CMD_THERMOSTAT_SET_OFF
+        )
         await self.send_command(cmd, [device_id, str(thermo.local_off)])
 
     async def toggle_thermostat_keyboard_lock(self, device_id: str) -> None:

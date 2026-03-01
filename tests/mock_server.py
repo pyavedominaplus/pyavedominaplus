@@ -398,13 +398,13 @@ class MockDominaServer:
         device_id = parameters[0]
         sub_cmd = parameters[1]
         current = self.device_statuses.get(device_id, 0)
-        if sub_cmd == "11":    # ON
+        if sub_cmd == "11":  # ON
             new_value = 1
         elif sub_cmd == "12":  # OFF
             new_value = 0
         elif sub_cmd == "10":  # TOGGLE
             new_value = 0 if current else 1
-        elif sub_cmd == "2":   # DIMMER STEP
+        elif sub_cmd == "2":  # DIMMER STEP
             new_value = 0 if current else 1
         else:
             new_value = current
@@ -421,7 +421,7 @@ class MockDominaServer:
             return
         device_id = parameters[0]
         sub_cmd = parameters[1]
-        if sub_cmd == "8":    # OPEN -> OPENING (2) -> OPEN (1)
+        if sub_cmd == "8":  # OPEN -> OPENING (2) -> OPEN (1)
             new_value = 2  # OPENING
         elif sub_cmd == "9":  # CLOSE -> CLOSING (4) -> CLOSED (3)
             new_value = 4  # CLOSING
