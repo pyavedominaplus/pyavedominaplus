@@ -246,6 +246,21 @@ class MockDominaServer:
             except Exception:
                 pass
 
+    async def send_text_update(
+        self,
+        command: str,
+        parameters: list[str] | None = None,
+        records: list[list[str]] | None = None,
+    ) -> None:
+        """Send a text-framed update to all connected clients."""
+        msg = encode_message(command.lower(), parameters, records)
+        text = msg.decode("utf-8")
+        for ws in list(self._clients):
+            try:
+                await ws.send_str(text)
+            except Exception:
+                pass
+
     async def _handler(self, request: web.Request) -> web.WebSocketResponse:
         """Handle a WebSocket connection."""
         ws = web.WebSocketResponse(protocols=["binary", "base64"])

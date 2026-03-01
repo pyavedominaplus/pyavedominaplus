@@ -864,3 +864,174 @@ class TestClientUPDEdgeCases:
 
         status_events = [e for e in events if e[0] == "device_status"]
         assert len(status_events) == 0
+
+
+class TestClientNewControlMethods:
+    """Tests for toggle_light, step_dimmer, activate_scenario fallback,
+    toggle_thermostat_local_off, and toggle_thermostat_keyboard_lock."""
+
+    async def test_toggle_light(self, client, mock_server):
+        """Test toggling a light on (EBI/10 sub-command)."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+        mock_server.device_statuses["100"] = 0
+
+        await client.toggle_light("100")
+        await asyncio.sleep(0.2)
+
+        assert mock_server.device_statuses["100"] == 1
+
+    async def test_step_dimmer(self, client, mock_server):
+        """Test step_dimmer sends EBI with sub-command 2."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+        mock_server.device_statuses["101"] = 0
+
+        await client.step_dimmer("101")
+        await asyncio.sleep(0.2)
+
+        assert mock_server.device_statuses["101"] == 1
+
+    async def test_activate_scenario_fallback(self, client, mock_server):
+        """activate_scenario falls back to device_id when no scenario map command found."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+        mock_server.received_commands.clear()
+
+        # "100" is a light, not a scenario — hits the fallback path
+        await client.activate_scenario("100")
+        await asyncio.sleep(0.2)
+
+        es_cmds = [c for c in mock_server.received_commands if c["command"] == "ES"]
+        assert len(es_cmds) > 0
+        assert es_cmds[-1]["parameters"] == ["100"]
+
+    async def test_toggle_thermostat_local_off_nonexistent(self, client, mock_server):
+        """toggle_thermostat_local_off is a no-op for unknown device."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+        # Should not raise
+        await client.toggle_thermostat_local_off("999")
+
+    async def test_toggle_thermostat_local_off_standard(self, client, mock_server):
+        """toggle_thermostat_local_off sends TOO for a standard thermostat."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+        mock_server.received_commands.clear()
+
+        await client.toggle_thermostat_local_off("103")
+        await asyncio.sleep(0.2)
+
+        too_cmds = [c for c in mock_server.received_commands if c["command"] == "TOO"]
+        assert len(too_cmds) > 0
+        assert too_cmds[-1]["parameters"][0] == "103"
+
+    async def test_toggle_thermostat_local_off_vmc_daikin(self, mock_server):
+        """toggle_thermostat_local_off sends TUU for a VMC Daikin thermostat."""
+        c = AVEDominaClient(host="127.0.0.1", port=mock_server.port)
+        await c.connect()
+        try:
+            # Inject a VMC Daikin thermostat (id offset by 10,000,000)
+            await c._handle_ldi([], [["10000500", "VMC Daikin", "4", "1"]])
+            assert "500" in c.thermostats
+            assert c.thermostats["500"].is_vmc_daikin
+
+            mock_server.received_commands.clear()
+            await c.toggle_thermostat_local_off("500")
+            await asyncio.sleep(0.2)
+
+            tuu_cmds = [
+                cmd for cmd in mock_server.received_commands if cmd["command"] == "TUU"
+            ]
+            assert len(tuu_cmds) > 0
+            assert tuu_cmds[-1]["parameters"][0] == "500"
+        finally:
+            await c.disconnect()
+
+    async def test_toggle_thermostat_keyboard_lock(self, client, mock_server):
+        """toggle_thermostat_keyboard_lock sends TTK command."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+        mock_server.received_commands.clear()
+
+        await client.toggle_thermostat_keyboard_lock("103")
+        await asyncio.sleep(0.2)
+
+        ttk_cmds = [c for c in mock_server.received_commands if c["command"] == "TTK"]
+        assert len(ttk_cmds) > 0
+        assert ttk_cmds[-1]["parameters"] == ["103"]
+
+
+class TestClientListenLoopEdgeCases:
+    """Tests for _listen_loop and _handle_message edge cases."""
+
+    async def test_handle_unknown_command(self, client, mock_server):
+        """_handle_message with an unrecognised command logs and does nothing."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+        # Should not raise
+        await client._handle_message(
+            {"command": "unknown_xyz", "parameters": [], "records": []}
+        )
+
+    async def test_handle_lml_no_op(self, client, mock_server):
+        """_handle_lml is a no-op."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+        await client._handle_lml([], [])
+
+    async def test_handle_net_no_op(self, client, mock_server):
+        """_handle_net is a no-op."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+        await client._handle_net([], [])
+
+    async def test_server_stop_triggers_error_callback(self, mock_server):
+        """When the server closes the connection, the client emits an ERROR status."""
+        statuses = []
+        c = AVEDominaClient(host="127.0.0.1", port=mock_server.port)
+        c.register_connection_callback(lambda s: statuses.append(s))
+        await c.connect()
+        assert "OPEN" in statuses
+        try:
+            # Close the server side — client receives CLOSED/CLOSING frame
+            await mock_server.stop()
+            await asyncio.sleep(0.3)
+            assert "ERROR" in statuses
+        finally:
+            await c.disconnect()
+
+    async def test_listen_loop_text_message(self, client, mock_server):
+        """Client processes text-framed WebSocket messages correctly."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+        await asyncio.sleep(0.5)
+
+        events = []
+        client.register_update_callback(lambda t, d: events.append((t, d)))
+
+        # Send the encoded message as a text frame (not binary)
+        await mock_server.send_text_update("upd", ["WS", "1", "100", "1"])
+        await asyncio.sleep(0.2)
+
+        status_events = [
+            e for e in events if e[0] == "device_status" and e[1]["device_id"] == "100"
+        ]
+        assert len(status_events) > 0
+
+    async def test_listen_loop_decode_exception(self, client, mock_server):
+        """Exception during message decode is caught and the client stays connected."""
+        from unittest.mock import patch
+
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+
+        with patch(
+            "pyavedominaplus.client.decode_message",
+            side_effect=ValueError("bad data"),
+        ):
+            await mock_server.send_update("upd", ["WS", "1", "100", "1"])
+            await asyncio.sleep(0.2)
+
+        # Client should still be connected after the caught exception
+        assert client.connected
