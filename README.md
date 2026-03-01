@@ -97,7 +97,7 @@ pyavedominaplus/           Python SDK
   models.py                DominaDevice, DominaThermostat, DominaArea
   const.py                 Protocol constants and device types
 
-tests/                     SDK unit tests (158 tests)
+tests/                     SDK unit tests (196 tests)
 ```
 
 ## Running tests
@@ -112,6 +112,17 @@ coverage report
 
 # Specific module
 pytest tests/test_client.py -v
+```
+
+### Hardware test
+
+An interactive test script is available for manual testing against real DominaPlus hardware. It connects to a device, discovers all devices, lets you pick one per category (light, dimmer, shutter, thermostat, scenario), and walks through each operation with human confirmation (e.g. "Did the light turn on? [y/n/skip]").
+
+```bash
+python test_hardware.py <host> [port]
+# Example:
+python test_hardware.py 192.168.1.100
+python test_hardware.py 192.168.1.100 14001
 ```
 
 ## Protocol notes

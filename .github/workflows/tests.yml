@@ -29,11 +29,11 @@ jobs:
 
       - name: Lint with ruff
         run: |
-          ruff check pyavedominaplus tests
+          ruff check pyavedominaplus tests test_hardware.py
 
       - name: Format check with black
         run: |
-          black --check pyavedominaplus tests
+          black --check pyavedominaplus tests test_hardware.py
 
       - name: Run tests
         run: |
