@@ -102,7 +102,7 @@ MOCK_MAP_COMMANDS = {
         [
             "5",
             "Night Scenario",
-            "6",
+            "17",  # command_type 17 = scenario
             "100",
             "60",
             "0",
@@ -156,6 +156,14 @@ MOCK_MAP_COMMANDS = {
             "16",
         ],
     ],
+}
+
+# Map from command_id to device_id (for ES scenario execution)
+MOCK_COMMAND_TO_DEVICE = {
+    cmd[0]: cmd[14]
+    for area_cmds in MOCK_MAP_COMMANDS.values()
+    for cmd in area_cmds
+    if len(cmd) > 14
 }
 
 MOCK_DEVICE_ADDRESSES = [
@@ -278,12 +286,19 @@ class MockDominaServer:
             await self._respond_li2(ws)
         elif command == "LMC":
             await self._respond_lmc(ws, parameters)
+        elif command == "LML":
+            resp = encode_message("ack", [command])
+            await ws.send_bytes(resp)
         elif command == "WTS":
             await self._respond_wts(ws, parameters)
         elif command == "WSF":
             await self._respond_wsf(ws, parameters)
-        elif command == "WSC":
-            await self._process_wsc(ws, parameters)
+        elif command == "EBI":
+            await self._process_ebi(ws, parameters)
+        elif command == "EAI":
+            await self._process_eai(ws, parameters)
+        elif command == "ES":
+            await self._process_es(ws, parameters)
         elif command == "SIL":
             await self._process_sil(ws, parameters)
         elif command == "STS":
@@ -293,9 +308,8 @@ class MockDominaServer:
             await ws.send_bytes(resp)
         elif command == "PONG":
             pass  # No response needed
-        elif command in ("SU2", "SU3", "GTM", "GMA", "GNA", "GSF"):
-            # Send ACK for these commands
-            resp = encode_message("ack")
+        elif command in ("SU2", "SU3", "GTM", "GMA", "GNA", "GSF", "TTK", "TOO", "TUU"):
+            resp = encode_message("ack", [command])
             await ws.send_bytes(resp)
 
     async def _respond_lm(self, ws: web.WebSocketResponse) -> None:
@@ -355,30 +369,82 @@ class MockDominaServer:
         resp = encode_message("ack")
         await ws.send_bytes(resp)
 
-    async def _process_wsc(
+    def _find_device_type(self, device_id: str) -> int:
+        """Find the device type for a device ID."""
+        for d in MOCK_DEVICES:
+            if d[0] == device_id:
+                return int(d[2])
+        return 1
+
+    async def _send_upd_ws(self, device_id: str, value: int) -> None:
+        """Send a WS update to all clients."""
+        device_type = self._find_device_type(device_id)
+        upd = encode_message(
+            "upd",
+            parameters=["WS", str(device_type), device_id, str(value)],
+        )
+        for client in self._clients:
+            try:
+                await client.send_bytes(upd)
+            except Exception:
+                pass
+
+    async def _process_ebi(
         self, ws: web.WebSocketResponse, parameters: list[str]
     ) -> None:
-        """Process a device command (turn on/off/set)."""
-        if len(parameters) >= 2:
-            device_id = parameters[0]
-            value = int(parameters[1])
-            self.device_statuses[device_id] = value
-            # Find device type
-            device_type = 1
-            for d in MOCK_DEVICES:
-                if d[0] == device_id:
-                    device_type = int(d[2])
-                    break
-            # Send UPD to all clients
-            upd = encode_message(
-                "upd",
-                parameters=["WS", str(device_type), device_id, str(value)],
-            )
-            for client in self._clients:
-                try:
-                    await client.send_bytes(upd)
-                except Exception:
-                    pass
+        """Process a light/energy EBI command."""
+        if len(parameters) < 2:
+            return
+        device_id = parameters[0]
+        sub_cmd = parameters[1]
+        current = self.device_statuses.get(device_id, 0)
+        if sub_cmd == "11":    # ON
+            new_value = 1
+        elif sub_cmd == "12":  # OFF
+            new_value = 0
+        elif sub_cmd == "10":  # TOGGLE
+            new_value = 0 if current else 1
+        elif sub_cmd == "2":   # DIMMER STEP
+            new_value = 0 if current else 1
+        else:
+            new_value = current
+        self.device_statuses[device_id] = new_value
+        resp = encode_message("ack", ["EBI"])
+        await ws.send_bytes(resp)
+        await self._send_upd_ws(device_id, new_value)
+
+    async def _process_eai(
+        self, ws: web.WebSocketResponse, parameters: list[str]
+    ) -> None:
+        """Process a shutter EAI command."""
+        if len(parameters) < 2:
+            return
+        device_id = parameters[0]
+        sub_cmd = parameters[1]
+        if sub_cmd == "8":    # OPEN -> OPENING (2) -> OPEN (1)
+            new_value = 2  # OPENING
+        elif sub_cmd == "9":  # CLOSE -> CLOSING (4) -> CLOSED (3)
+            new_value = 4  # CLOSING
+        else:
+            new_value = self.device_statuses.get(device_id, 0)
+        self.device_statuses[device_id] = new_value
+        resp = encode_message("ack", ["EAI"])
+        await ws.send_bytes(resp)
+        await self._send_upd_ws(device_id, new_value)
+
+    async def _process_es(
+        self, ws: web.WebSocketResponse, parameters: list[str]
+    ) -> None:
+        """Process an ES (execute scenario) command."""
+        if not parameters:
+            return
+        command_id = parameters[0]
+        device_id = MOCK_COMMAND_TO_DEVICE.get(command_id)
+        if device_id:
+            self.device_statuses[device_id] = 1
+            resp = encode_message("ack", ["ES"])
+            await ws.send_bytes(resp)
+            await self._send_upd_ws(device_id, 1)
 
     async def _process_sil(
         self, ws: web.WebSocketResponse, parameters: list[str]
@@ -388,16 +454,7 @@ class MockDominaServer:
             device_id = parameters[0]
             level = int(parameters[1])
             self.device_statuses[device_id] = level
-            # Send UPD
-            upd = encode_message(
-                "upd",
-                parameters=["WS", "2", device_id, str(level)],
-            )
-            for client in self._clients:
-                try:
-                    await client.send_bytes(upd)
-                except Exception:
-                    pass
+            await self._send_upd_ws(device_id, level)
 
     async def _process_sts(
         self, ws: web.WebSocketResponse, parameters: list[str], records: list[list[str]]

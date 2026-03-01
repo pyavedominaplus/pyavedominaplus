@@ -7,33 +7,46 @@ from typing import Any, Callable
 import aiohttp
 
 from .const import (
+    CMD_EXECUTE_SCENARIO,
     CMD_GET_DEVICE_STATUS_FAMILY,
     CMD_GET_MARCIA_ARRESTO,
     CMD_GET_NO_ACTION,
     CMD_GET_THERMOSTAT_MODE,
     CMD_GET_THERMOSTAT_STATUS,
+    CMD_LIGHT_COMMAND,
     CMD_LIST_DEVICES,
     CMD_LIST_DEVICE_ADDRESSES,
     CMD_LIST_MAP_COMMANDS,
+    CMD_LIST_MAP_LABELS,
     CMD_LIST_MAPS,
     CMD_PONG,
     CMD_SET_DIMMER_LEVEL,
     CMD_SET_THERMOSTAT_STATUS,
+    CMD_SHUTTER_COMMAND,
     CMD_SUBSCRIBE_UPDATES_2,
     CMD_SUBSCRIBE_UPDATES_3,
+    CMD_THERMOSTAT_KEYBOARD_LOCK,
+    CMD_THERMOSTAT_SET_OFF,
+    CMD_THERMOSTAT_SET_OFF_TS01,
     CONN_STATUS_CLOSE,
     CONN_STATUS_ERROR,
     CONN_STATUS_OPEN,
     DEFAULT_WS_PORT,
     DEVICE_TYPE_THERMOSTAT,
+    DIMMER_CMD_STEP,
+    LIGHT_CMD_OFF,
+    LIGHT_CMD_ON,
+    LIGHT_CMD_TOGGLE,
+    SHUTTER_CMD_CLOSE,
+    SHUTTER_CMD_OPEN,
     UPD_DEVICE_STATUS,
-    UPD_THERMOSTAT,
-    UPD_THERMOSTAT_SETPOINT,
-    UPD_THERMOSTAT_MODE,
-    UPD_THERMOSTAT_KEYBOARD_LOCK,
-    UPD_THERMOSTAT_WINDOW,
     UPD_HUMIDITY,
     UPD_RGB,
+    UPD_THERMOSTAT,
+    UPD_THERMOSTAT_KEYBOARD_LOCK,
+    UPD_THERMOSTAT_MODE,
+    UPD_THERMOSTAT_SETPOINT,
+    UPD_THERMOSTAT_WINDOW,
 )
 from .models import (
     DominaArea,
@@ -200,33 +213,59 @@ class AVEDominaClient:
         await self.send_command(CMD_SUBSCRIBE_UPDATES_3)
 
     async def turn_on_light(self, device_id: str) -> None:
-        """Turn on a light device."""
-        await self.send_command("WSC", [device_id, "1"])
+        """Turn on a light or energy device."""
+        await self.send_command(CMD_LIGHT_COMMAND, [device_id, LIGHT_CMD_ON])
 
     async def turn_off_light(self, device_id: str) -> None:
-        """Turn off a light device."""
-        await self.send_command("WSC", [device_id, "0"])
+        """Turn off a light or energy device."""
+        await self.send_command(CMD_LIGHT_COMMAND, [device_id, LIGHT_CMD_OFF])
+
+    async def toggle_light(self, device_id: str) -> None:
+        """Toggle a light or energy device on/off."""
+        await self.send_command(CMD_LIGHT_COMMAND, [device_id, LIGHT_CMD_TOGGLE])
 
     async def set_dimmer_level(self, device_id: str, level: int) -> None:
         """Set a dimmer to a specific level (0-31)."""
         level = max(0, min(31, level))
         await self.send_command(CMD_SET_DIMMER_LEVEL, [device_id, str(level)])
 
+    async def step_dimmer(self, device_id: str) -> None:
+        """Step a dimmer (toggle on/off)."""
+        await self.send_command(CMD_LIGHT_COMMAND, [device_id, DIMMER_CMD_STEP])
+
     async def open_shutter(self, device_id: str) -> None:
-        """Open a shutter."""
-        await self.send_command("WSC", [device_id, "1"])
+        """Open/raise a shutter."""
+        await self.send_command(CMD_SHUTTER_COMMAND, [device_id, SHUTTER_CMD_OPEN])
 
     async def close_shutter(self, device_id: str) -> None:
-        """Close a shutter."""
-        await self.send_command("WSC", [device_id, "0"])
-
-    async def stop_shutter(self, device_id: str) -> None:
-        """Stop a shutter."""
-        await self.send_command("WSC", [device_id, "2"])
+        """Close/lower a shutter."""
+        await self.send_command(CMD_SHUTTER_COMMAND, [device_id, SHUTTER_CMD_CLOSE])
 
     async def activate_scenario(self, device_id: str) -> None:
-        """Activate a scenario."""
-        await self.send_command("WSC", [device_id, "1"])
+        """Activate a scenario by finding its map command and executing it."""
+        for area in self._areas.values():
+            for cmd in area.map_commands:
+                if cmd.device_id == device_id and cmd.command_type == 17:
+                    await self.send_command(CMD_EXECUTE_SCENARIO, [cmd.command_id])
+                    return
+        # Fallback: try device_id directly as command_id
+        await self.send_command(CMD_EXECUTE_SCENARIO, [device_id])
+
+    async def toggle_thermostat_local_off(self, device_id: str) -> None:
+        """Toggle a thermostat's local off state (on <-> off).
+
+        Sends the current local_off value; the server inverts it.
+        Uses TUU for TS01 thermostats, TOO for standard ones.
+        """
+        thermo = self._thermostats.get(device_id)
+        if not thermo:
+            return
+        cmd = CMD_THERMOSTAT_SET_OFF_TS01 if thermo.is_vmc_daikin else CMD_THERMOSTAT_SET_OFF
+        await self.send_command(cmd, [device_id, str(thermo.local_off)])
+
+    async def toggle_thermostat_keyboard_lock(self, device_id: str) -> None:
+        """Toggle a thermostat's keyboard lock."""
+        await self.send_command(CMD_THERMOSTAT_KEYBOARD_LOCK, [device_id])
 
     async def set_thermostat_set_point(self, device_id: str, set_point: float) -> None:
         """Set a thermostat's target temperature.
@@ -310,11 +349,13 @@ class AVEDominaClient:
             "ldi": self._handle_ldi,
             "li2": self._handle_li2,
             "lmc": self._handle_lmc,
+            "lml": self._handle_lml,
             "upd": self._handle_upd,
             "wts": self._handle_wts,
             "ping": self._handle_ping,
             "ack": self._handle_ack,
             "gsf": self._handle_gsf,
+            "net": self._handle_net,
         }.get(command)
 
         if handler:
@@ -337,6 +378,7 @@ class AVEDominaClient:
                 )
                 self._areas[area.id] = area
                 await self.send_command(CMD_LIST_MAP_COMMANDS, [area.id])
+                await self.send_command(CMD_LIST_MAP_LABELS, [area.id])
         self._lm_loaded = True
         self._notify_update("lm_loaded", {"areas": self._areas})
 
@@ -602,10 +644,22 @@ class AVEDominaClient:
         """Handle ACK - no operation needed."""
         pass
 
+    async def _handle_lml(
+        self, parameters: list[str], records: list[list[str]]
+    ) -> None:
+        """Handle LML (list map labels) response - no action needed."""
+        pass
+
     async def _handle_gsf(
         self, parameters: list[str], records: list[list[str]]
     ) -> None:
         """Handle GSF (get sensor family) response."""
+        pass
+
+    async def _handle_net(
+        self, parameters: list[str], records: list[list[str]]
+    ) -> None:
+        """Handle NET (network status) messages - no action needed."""
         pass
 
     async def wait_for_initialization(self, timeout: float = 30.0) -> bool:

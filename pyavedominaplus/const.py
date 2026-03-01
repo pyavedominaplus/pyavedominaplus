@@ -66,13 +66,37 @@ CMD_PONG = "PONG"
 CMD_PING = "PING"
 CMD_SET_DIMMER_LEVEL = "SIL"
 
-# UPD event subtypes
+# Device control commands (client -> server)
+CMD_LIGHT_COMMAND = "EBI"             # Light/energy on/off/toggle
+CMD_SHUTTER_COMMAND = "EAI"           # Shutter open/close
+CMD_EXECUTE_SCENARIO = "ES"           # Execute scenario (map command ID)
+CMD_EXECUTE_MAP_COMMAND = "EBC"       # Execute generic map command
+CMD_THERMOSTAT_SET_OFF = "TOO"        # Set thermostat local off (standard)
+CMD_THERMOSTAT_SET_OFF_TS01 = "TUU"   # Set thermostat local off (TS01 type)
+CMD_THERMOSTAT_KEYBOARD_LOCK = "TTK"  # Toggle thermostat keyboard lock
+
+# Light sub-command values (used with CMD_LIGHT_COMMAND)
+LIGHT_CMD_TOGGLE = "10"  # Toggle light on/off (step)
+LIGHT_CMD_ON = "11"      # Turn light on
+LIGHT_CMD_OFF = "12"     # Turn light off
+DIMMER_CMD_STEP = "2"    # Dimmer step (toggle)
+
+# Shutter sub-command values (used with CMD_SHUTTER_COMMAND)
+SHUTTER_CMD_OPEN = "8"   # Open/raise shutter
+SHUTTER_CMD_CLOSE = "9"  # Close/lower shutter
+
+# UPD event subtypes (server -> client)
 UPD_DEVICE_STATUS = "WS"
 UPD_THERMOSTAT = "WT"
 UPD_THERMOSTAT_SETPOINT = "TP"
 UPD_THERMOSTAT_MODE = "TM"
 UPD_THERMOSTAT_KEYBOARD_LOCK = "TK"
 UPD_THERMOSTAT_WINDOW = "TW"
+UPD_THERMOSTAT_LOCAL_OFF_MAP = "TLO"  # Thermostat local off (from map)
+UPD_THERMOSTAT_SEASON_MAP = "TS"      # Thermostat season (from map)
+UPD_THERMOSTAT_TEMP_MAP = "TT"        # Thermostat temperature (from map)
+UPD_THERMOSTAT_OFFSET_MAP = "TO"      # Thermostat offset (from map)
+UPD_THERMOSTAT_FANLEVEL_MAP = "TL"    # Thermostat fan level (from map)
 UPD_HUMIDITY = "UMI"
 UPD_RGB = "RGB"
 UPD_TUTONDO = "S"

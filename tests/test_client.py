@@ -146,34 +146,25 @@ class TestClientDeviceControl:
         assert mock_server.device_statuses["101"] == 31
 
     async def test_open_shutter(self, client, mock_server):
-        """Test opening a shutter."""
+        """Test opening a shutter (EAI command, status OPENING=2)."""
         await client.initialize()
         await client.wait_for_initialization(timeout=5.0)
 
         await client.open_shutter("102")
         await asyncio.sleep(0.2)
-        assert mock_server.device_statuses["102"] == 1
+        assert mock_server.device_statuses["102"] == 2  # OPENING
 
     async def test_close_shutter(self, client, mock_server):
-        """Test closing a shutter."""
+        """Test closing a shutter (EAI command, status CLOSING=4)."""
         await client.initialize()
         await client.wait_for_initialization(timeout=5.0)
 
         await client.close_shutter("102")
         await asyncio.sleep(0.2)
-        assert mock_server.device_statuses["102"] == 0
-
-    async def test_stop_shutter(self, client, mock_server):
-        """Test stopping a shutter."""
-        await client.initialize()
-        await client.wait_for_initialization(timeout=5.0)
-
-        await client.stop_shutter("102")
-        await asyncio.sleep(0.2)
-        assert mock_server.device_statuses["102"] == 2
+        assert mock_server.device_statuses["102"] == 4  # CLOSING
 
     async def test_activate_scenario(self, client, mock_server):
-        """Test activating a scenario."""
+        """Test activating a scenario via ES command using map command lookup."""
         await client.initialize()
         await client.wait_for_initialization(timeout=5.0)
 

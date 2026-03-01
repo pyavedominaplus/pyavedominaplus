@@ -98,12 +98,26 @@ def decode_message(raw: bytes) -> list[dict]:
     return messages
 
 
-def encode_device_command(device_id: str, value: int) -> bytes:
-    """Encode a simple device ON/OFF or set-value command via WSF protocol.
+def encode_light_command(device_id: str, sub_command: str) -> bytes:
+    """Encode a light/energy on/off/toggle command (EBI).
 
-    For lights/shutters/scenarios, sends: WSC + GS + device_type + GS + device_id + GS + value
+    sub_command values:
+        "10" = toggle on/off
+        "11" = turn on
+        "12" = turn off
+        "2"  = dimmer step (toggle)
     """
-    return encode_message("WSC", [device_id, str(value)])
+    return encode_message("EBI", [device_id, sub_command])
+
+
+def encode_shutter_command(device_id: str, sub_command: str) -> bytes:
+    """Encode a shutter open/close command (EAI).
+
+    sub_command values:
+        "8" = open/raise
+        "9" = close/lower
+    """
+    return encode_message("EAI", [device_id, sub_command])
 
 
 def encode_set_dimmer_level(device_id: str, level: int) -> bytes:
@@ -123,15 +137,6 @@ def encode_thermostat_set_point(
     Sends: STS + GS + device_id + RS + season,mode,setpoint
     set_point is in tenths of a degree (e.g. 210 = 21.0C).
     """
-    return encode_message(
-        "STS", [device_id], [[str(season), str(mode), str(set_point)]]
-    )
-
-
-def encode_thermostat_season(
-    device_id: str, season: int, mode: int, set_point: int
-) -> bytes:
-    """Encode a thermostat season change command."""
     return encode_message(
         "STS", [device_id], [[str(season), str(mode), str(set_point)]]
     )

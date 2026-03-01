@@ -5,7 +5,8 @@ from pyavedominaplus.protocol import (
     build_crc,
     decode_message,
     encode_message,
-    encode_device_command,
+    encode_light_command,
+    encode_shutter_command,
     encode_set_dimmer_level,
     encode_thermostat_set_point,
 )
@@ -178,12 +179,40 @@ class TestDecodeMessage:
 class TestConvenienceEncoders:
     """Tests for convenience encoding functions."""
 
-    def test_encode_device_command(self):
-        """Test device command encoding."""
-        msg = encode_device_command("100", 1)
+    def test_encode_light_on(self):
+        """Test light ON command encoding (EBI)."""
+        msg = encode_light_command("100", "11")
         decoded = decode_message(msg)
-        assert decoded[0]["command"] == "WSC"
-        assert decoded[0]["parameters"] == ["100", "1"]
+        assert decoded[0]["command"] == "EBI"
+        assert decoded[0]["parameters"] == ["100", "11"]
+
+    def test_encode_light_off(self):
+        """Test light OFF command encoding (EBI)."""
+        msg = encode_light_command("100", "12")
+        decoded = decode_message(msg)
+        assert decoded[0]["command"] == "EBI"
+        assert decoded[0]["parameters"] == ["100", "12"]
+
+    def test_encode_light_toggle(self):
+        """Test light toggle command encoding (EBI)."""
+        msg = encode_light_command("100", "10")
+        decoded = decode_message(msg)
+        assert decoded[0]["command"] == "EBI"
+        assert decoded[0]["parameters"] == ["100", "10"]
+
+    def test_encode_shutter_open(self):
+        """Test shutter open command encoding (EAI)."""
+        msg = encode_shutter_command("200", "8")
+        decoded = decode_message(msg)
+        assert decoded[0]["command"] == "EAI"
+        assert decoded[0]["parameters"] == ["200", "8"]
+
+    def test_encode_shutter_close(self):
+        """Test shutter close command encoding (EAI)."""
+        msg = encode_shutter_command("200", "9")
+        decoded = decode_message(msg)
+        assert decoded[0]["command"] == "EAI"
+        assert decoded[0]["parameters"] == ["200", "9"]
 
     def test_encode_dimmer_level(self):
         """Test dimmer level encoding."""
@@ -199,16 +228,6 @@ class TestConvenienceEncoders:
         assert decoded[0]["command"] == "STS"
         assert decoded[0]["parameters"] == ["103"]
         assert decoded[0]["records"][0] == ["1", "1", "215"]
-
-    def test_encode_thermostat_season(self):
-        """Test thermostat season encoding."""
-        from pyavedominaplus.protocol import encode_thermostat_season
-
-        msg = encode_thermostat_season("103", season=0, mode=1, set_point=210)
-        decoded = decode_message(msg)
-        assert decoded[0]["command"] == "STS"
-        assert decoded[0]["parameters"] == ["103"]
-        assert decoded[0]["records"][0] == ["0", "1", "210"]
 
 
 class TestProtocolEdgeCases:
