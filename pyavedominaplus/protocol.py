@@ -121,12 +121,15 @@ def encode_shutter_command(device_id: str, sub_command: str) -> bytes:
 
 
 def encode_set_dimmer_level(device_id: str, level: int) -> bytes:
-    """Encode a dimmer level command.
+    """Encode a dimmer level command (SIL = Set Intensity Level).
 
-    Sends: SIL + GS + device_id + GS + level
+    The device_id is sent as a parameter (GS = Group Separator delimited)
+    and the level is sent as a record (RS = Record Separator delimited),
+    matching the format used by the official AVE webapp:
+        SIL + GS + device_id + RS + level
     Level is 0-31.
     """
-    return encode_message("SIL", [device_id, str(level)])
+    return encode_message("SIL", [device_id], [[str(level)]])
 
 
 def encode_thermostat_set_point(

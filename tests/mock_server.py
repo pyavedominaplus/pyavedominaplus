@@ -315,7 +315,7 @@ class MockDominaServer:
         elif command == "ES":
             await self._process_es(ws, parameters)
         elif command == "SIL":
-            await self._process_sil(ws, parameters)
+            await self._process_sil(ws, parameters, msg["records"])
         elif command == "STS":
             await self._process_sts(ws, parameters, msg["records"])
         elif command == "PING":
@@ -462,12 +462,15 @@ class MockDominaServer:
             await self._send_upd_ws(device_id, 1)
 
     async def _process_sil(
-        self, ws: web.WebSocketResponse, parameters: list[str]
+        self, ws: web.WebSocketResponse, parameters: list[str], records: list[list[str]]
     ) -> None:
-        """Process a dimmer level command."""
-        if len(parameters) >= 2:
+        """Process a dimmer level command.
+
+        The level is sent as a record (RS-separated), not as a parameter.
+        """
+        if parameters and records and records[0]:
             device_id = parameters[0]
-            level = int(parameters[1])
+            level = int(records[0][0])
             self.device_statuses[device_id] = level
             await self._send_upd_ws(device_id, level)
 
