@@ -79,6 +79,24 @@ MOCK_MAP_COMMANDS = {
             "102",
             "3",
         ],
+        [
+            "8",
+            "Thermostat LR",
+            "4",  # command_type 4 = thermostat
+            "200",
+            "60",
+            "0",
+            "1",
+            "2",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "0",
+            "103",
+            "4",
+        ],
     ],
     "2": [  # Bedroom
         [
@@ -204,6 +222,7 @@ class MockDominaServer:
         self._site: web.TCPSite | None = None
         self._clients: set[web.WebSocketResponse] = set()
         self.device_statuses = dict(_device_statuses)
+        self.thermostat_local_off: dict[str, int] = {"103": 0}
         self.received_commands: list[dict] = []
 
     async def start(self) -> int:
@@ -323,7 +342,9 @@ class MockDominaServer:
             await ws.send_bytes(resp)
         elif command == "PONG":
             pass  # No response needed
-        elif command in ("SU2", "SU3", "GTM", "GMA", "GNA", "GSF", "TTK", "TOO", "TUU"):
+        elif command in ("TOO", "TUU"):
+            await self._process_too(ws, parameters)
+        elif command in ("SU2", "SU3", "GTM", "GMA", "GNA", "GSF", "TTK"):
             resp = encode_message("ack", [command])
             await ws.send_bytes(resp)
 
@@ -413,12 +434,16 @@ class MockDominaServer:
         device_id = parameters[0]
         sub_cmd = parameters[1]
         current = self.device_statuses.get(device_id, 0)
-        if sub_cmd == "11":  # ON
+        if sub_cmd == "11":  # LIGHT ON
             new_value = 1
-        elif sub_cmd == "12":  # OFF
+        elif sub_cmd == "12":  # LIGHT OFF
             new_value = 0
-        elif sub_cmd == "10":  # TOGGLE
+        elif sub_cmd == "10":  # LIGHT TOGGLE
             new_value = 0 if current else 1
+        elif sub_cmd == "3":  # DIMMER ON
+            new_value = 1
+        elif sub_cmd == "4":  # DIMMER OFF
+            new_value = 0
         elif sub_cmd == "2":  # DIMMER STEP
             new_value = 0 if current else 1
         else:
@@ -477,16 +502,59 @@ class MockDominaServer:
     async def _process_sts(
         self, ws: web.WebSocketResponse, parameters: list[str], records: list[list[str]]
     ) -> None:
-        """Process a thermostat set command."""
+        """Process a thermostat set command (STS).
+
+        Record format: [season, mode, set_point]
+        Sends UPD TP for set point and UPD TM for mode changes.
+        """
         if not parameters:
             return
         device_id = parameters[0]
         if records and records[0] and len(records[0]) >= 3:
+            season = records[0][0]
+            mode = records[0][1]
             set_point = records[0][2]
             # Send UPD for set point change
-            upd = encode_message("upd", parameters=["TP", device_id, set_point])
+            upd_tp = encode_message("upd", parameters=["TP", device_id, set_point])
+            # Send UPD for mode change
+            # TM mode: 'M' for manual (1), 'A' for auto (0)
+            mode_letter = "A" if mode == "0" else "M"
+            upd_tm = encode_message("upd", parameters=["TM", device_id, mode_letter])
+            # Send UPD for season change
+            upd_season = encode_message(
+                "upd", parameters=["WT", "S", device_id, season]
+            )
             for client in self._clients:
                 try:
-                    await client.send_bytes(upd)
+                    await client.send_bytes(upd_tp)
+                    await client.send_bytes(upd_tm)
+                    await client.send_bytes(upd_season)
                 except Exception:
                     pass
+
+    async def _process_too(
+        self, ws: web.WebSocketResponse, parameters: list[str]
+    ) -> None:
+        """Process a TOO/TUU (thermostat local off toggle) command.
+
+        The client sends TOO/TUU with the current local_off value.
+        The server inverts it and sends a UPD WT Z update.
+        """
+        if len(parameters) < 2:
+            return
+        device_id = parameters[0]
+        current = int(parameters[1])
+        new_local_off = 0 if current == 1 else 1
+        self.thermostat_local_off[device_id] = new_local_off
+        # Send ACK
+        resp = encode_message("ack", ["TOO"])
+        await ws.send_bytes(resp)
+        # Send UPD WT Z with new local_off state
+        upd = encode_message(
+            "upd", parameters=["WT", "Z", device_id, str(new_local_off)]
+        )
+        for client in self._clients:
+            try:
+                await client.send_bytes(upd)
+            except Exception:
+                pass

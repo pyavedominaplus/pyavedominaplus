@@ -12,6 +12,10 @@ from .const import (
     DEVICE_TYPE_SCENARIO,
     DEVICE_TYPE_SHUTTER,
     DEVICE_TYPE_THERMOSTAT,
+    SEASON_SUMMER,
+    SEASON_WINTER,
+    THERMOSTAT_MODE_AUTO,
+    THERMOSTAT_MODE_MANUAL,
 )
 from .models import (
     DominaArea,
@@ -40,6 +44,10 @@ __all__ = [
     "DEVICE_TYPE_SCENARIO",
     "DEVICE_TYPE_SHUTTER",
     "DEVICE_TYPE_THERMOSTAT",
+    "SEASON_SUMMER",
+    "SEASON_WINTER",
+    "THERMOSTAT_MODE_AUTO",
+    "THERMOSTAT_MODE_MANUAL",
 ]
 
 __version__ = "0.1.6"

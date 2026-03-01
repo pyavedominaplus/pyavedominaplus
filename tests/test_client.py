@@ -90,7 +90,7 @@ class TestClientInitialization:
         await client.wait_for_initialization(timeout=5.0)
         area = client.areas.get("1")
         assert area is not None
-        assert len(area.map_commands) == 3
+        assert len(area.map_commands) == 4
 
 
 class TestClientDeviceControl:
@@ -402,6 +402,102 @@ class TestClientUpdates:
         assert len(hum_events) > 0
         assert hum_events[0][1]["humidity"] == 65
         assert client.thermostats["103"].humidity_value == 65
+        assert client.thermostats["103"].humidity_enabled is True
+
+    async def test_humidity_update_sets_enabled(self, client, mock_server):
+        """Test that receiving UMI update sets humidity_enabled flag."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+        assert client.thermostats["103"].humidity_enabled is False
+
+        # UMI with just 6 parameters (minimum)
+        await mock_server.send_update("upd", ["UMI", "103", "55", "20", "40", "60"])
+        await asyncio.sleep(0.2)
+
+        assert client.thermostats["103"].humidity_enabled is True
+        assert client.thermostats["103"].humidity_value == 55
+
+    async def test_map_based_local_off_update(self, client, mock_server):
+        """Test TLO (thermostat local off from map) with inverted value.
+
+        Map command "8" -> device "103" (thermostat).
+        TLO value is inverted: server sends 0 means OFF (local_off=1).
+        """
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+
+        events = []
+        client.register_update_callback(lambda t, d: events.append((t, d)))
+
+        # TLO with value 0 -> inverted to local_off=1 (OFF)
+        await mock_server.send_update("upd", ["TLO", "8", "0"])
+        await asyncio.sleep(0.2)
+
+        off_events = [e for e in events if e[0] == "thermostat_local_off"]
+        assert len(off_events) > 0
+        assert client.thermostats["103"].local_off == 1
+
+    async def test_map_based_local_off_update_inverted(self, client, mock_server):
+        """Test TLO value inversion: server sends 1 means ON (local_off=0)."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+        client.thermostats["103"].local_off = 1  # Start off
+
+        await mock_server.send_update("upd", ["TLO", "8", "1"])
+        await asyncio.sleep(0.2)
+
+        assert client.thermostats["103"].local_off == 0
+
+    async def test_map_based_local_off_unknown_command(self, client, mock_server):
+        """TLO with unknown map command ID is silently ignored."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+
+        events = []
+        client.register_update_callback(lambda t, d: events.append((t, d)))
+
+        await mock_server.send_update("upd", ["TLO", "999", "0"])
+        await asyncio.sleep(0.2)
+
+        off_events = [e for e in events if e[0] == "thermostat_local_off"]
+        assert len(off_events) == 0
+
+    async def test_map_based_season_update(self, client, mock_server):
+        """Test TS (thermostat season from map) update."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+
+        # Map command "8" -> device "103"
+        await mock_server.send_update("upd", ["TS", "8", "0"])
+        await asyncio.sleep(0.2)
+        assert client.thermostats["103"].season == 0
+
+    async def test_map_based_temperature_update(self, client, mock_server):
+        """Test TT (thermostat temperature from map) update."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+
+        await mock_server.send_update("upd", ["TT", "8", "220"])
+        await asyncio.sleep(0.2)
+        assert client.thermostats["103"].temperature == 22.0
+
+    async def test_map_based_offset_update(self, client, mock_server):
+        """Test TO (thermostat offset from map) update."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+
+        await mock_server.send_update("upd", ["TO", "8", "15"])
+        await asyncio.sleep(0.2)
+        assert client.thermostats["103"].offset == 1.5
+
+    async def test_map_based_fanlevel_update(self, client, mock_server):
+        """Test TL (thermostat fan level from map) update."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+
+        await mock_server.send_update("upd", ["TL", "8", "3"])
+        await asyncio.sleep(0.2)
+        assert client.thermostats["103"].fan_level == 3
 
     async def test_rgb_update(self, client, mock_server):
         """Test receiving an RGB update via UPD RGB."""
@@ -881,6 +977,40 @@ class TestClientNewControlMethods:
 
         assert mock_server.device_statuses["100"] == 1
 
+    async def test_turn_on_dimmer(self, client, mock_server):
+        """Test turn_on_dimmer sends EBI with sub-command 3."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+        mock_server.device_statuses["101"] = 0
+
+        await client.turn_on_dimmer("101")
+        await asyncio.sleep(0.2)
+
+        assert mock_server.device_statuses["101"] == 1
+        ebi_cmds = [
+            c
+            for c in mock_server.received_commands
+            if c["command"] == "EBI" and c["parameters"][0] == "101"
+        ]
+        assert ebi_cmds[-1]["parameters"] == ["101", "3"]
+
+    async def test_turn_off_dimmer(self, client, mock_server):
+        """Test turn_off_dimmer sends EBI with sub-command 4."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+        mock_server.device_statuses["101"] = 15
+
+        await client.turn_off_dimmer("101")
+        await asyncio.sleep(0.2)
+
+        assert mock_server.device_statuses["101"] == 0
+        ebi_cmds = [
+            c
+            for c in mock_server.received_commands
+            if c["command"] == "EBI" and c["parameters"][0] == "101"
+        ]
+        assert ebi_cmds[-1]["parameters"] == ["101", "4"]
+
     async def test_step_dimmer(self, client, mock_server):
         """Test step_dimmer sends EBI with sub-command 2."""
         await client.initialize()
@@ -960,6 +1090,150 @@ class TestClientNewControlMethods:
         ttk_cmds = [c for c in mock_server.received_commands if c["command"] == "TTK"]
         assert len(ttk_cmds) > 0
         assert ttk_cmds[-1]["parameters"] == ["103"]
+
+    async def test_turn_off_thermostat(self, client, mock_server):
+        """turn_off_thermostat sends TOO when thermostat is on (local_off=0)."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+        # Thermostat 103 starts with local_off=0 (ON)
+        assert client.thermostats["103"].local_off == 0
+        mock_server.received_commands.clear()
+
+        await client.turn_off_thermostat("103")
+        await asyncio.sleep(0.3)
+
+        too_cmds = [c for c in mock_server.received_commands if c["command"] == "TOO"]
+        assert len(too_cmds) > 0
+        assert too_cmds[-1]["parameters"] == ["103", "0"]
+        # Server toggles local_off: 0 -> 1
+        assert client.thermostats["103"].local_off == 1
+
+    async def test_turn_off_thermostat_already_off(self, client, mock_server):
+        """turn_off_thermostat is a no-op when thermostat is already off."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+        # Set thermostat to off
+        client.thermostats["103"].local_off = 1
+        mock_server.received_commands.clear()
+
+        await client.turn_off_thermostat("103")
+        await asyncio.sleep(0.2)
+
+        too_cmds = [c for c in mock_server.received_commands if c["command"] == "TOO"]
+        assert len(too_cmds) == 0
+
+    async def test_turn_on_thermostat(self, client, mock_server):
+        """turn_on_thermostat sends TOO when thermostat is off (local_off=1)."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+        # Set thermostat to off first
+        client.thermostats["103"].local_off = 1
+        mock_server.received_commands.clear()
+
+        await client.turn_on_thermostat("103")
+        await asyncio.sleep(0.3)
+
+        too_cmds = [c for c in mock_server.received_commands if c["command"] == "TOO"]
+        assert len(too_cmds) > 0
+        assert too_cmds[-1]["parameters"] == ["103", "1"]
+        # Server toggles local_off: 1 -> 0
+        assert client.thermostats["103"].local_off == 0
+
+    async def test_turn_on_thermostat_already_on(self, client, mock_server):
+        """turn_on_thermostat is a no-op when thermostat is already on."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+        # Thermostat 103 starts with local_off=0 (ON)
+        assert client.thermostats["103"].local_off == 0
+        mock_server.received_commands.clear()
+
+        await client.turn_on_thermostat("103")
+        await asyncio.sleep(0.2)
+
+        too_cmds = [c for c in mock_server.received_commands if c["command"] == "TOO"]
+        assert len(too_cmds) == 0
+
+    async def test_turn_on_thermostat_nonexistent(self, client, mock_server):
+        """turn_on_thermostat is a no-op for unknown device."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+        await client.turn_on_thermostat("999")
+
+    async def test_turn_off_thermostat_nonexistent(self, client, mock_server):
+        """turn_off_thermostat is a no-op for unknown device."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+        await client.turn_off_thermostat("999")
+
+    async def test_set_thermostat_mode_auto(self, client, mock_server):
+        """set_thermostat_mode sends STS with mode=0 (auto)."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+        mock_server.received_commands.clear()
+
+        await client.set_thermostat_mode("103", 0)
+        await asyncio.sleep(0.3)
+
+        sts_cmds = [c for c in mock_server.received_commands if c["command"] == "STS"]
+        assert len(sts_cmds) > 0
+        # Record should contain [season, mode, set_point]
+        assert sts_cmds[-1]["records"][0][1] == "0"
+        # Client should receive TM update with mode='A' -> 0
+        assert client.thermostats["103"].mode == 0
+
+    async def test_set_thermostat_mode_manual(self, client, mock_server):
+        """set_thermostat_mode sends STS with mode=1 (manual)."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+        # Set to auto first
+        client.thermostats["103"].mode = 0
+        mock_server.received_commands.clear()
+
+        await client.set_thermostat_mode("103", 1)
+        await asyncio.sleep(0.3)
+
+        sts_cmds = [c for c in mock_server.received_commands if c["command"] == "STS"]
+        assert len(sts_cmds) > 0
+        assert sts_cmds[-1]["records"][0][1] == "1"
+        # Client should receive TM update with mode='M' -> 1
+        assert client.thermostats["103"].mode == 1
+
+    async def test_set_thermostat_mode_nonexistent(self, client, mock_server):
+        """set_thermostat_mode is a no-op for unknown device."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+        await client.set_thermostat_mode("999", 0)
+
+    async def test_thermostat_mode_update_letter_m(self, client, mock_server):
+        """TM update with letter 'M' sets mode to manual (1)."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+
+        events = []
+        client.register_update_callback(lambda t, d: events.append((t, d)))
+
+        await mock_server.send_update("upd", ["TM", "103", "M"])
+        await asyncio.sleep(0.2)
+
+        mode_events = [e for e in events if e[0] == "thermostat_mode"]
+        assert len(mode_events) > 0
+        assert client.thermostats["103"].mode == 1
+
+    async def test_thermostat_mode_update_letter_a(self, client, mock_server):
+        """TM update with letter 'A' sets mode to auto (0)."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+        client.thermostats["103"].mode = 1  # Start in manual
+
+        events = []
+        client.register_update_callback(lambda t, d: events.append((t, d)))
+
+        await mock_server.send_update("upd", ["TM", "103", "A"])
+        await asyncio.sleep(0.2)
+
+        mode_events = [e for e in events if e[0] == "thermostat_mode"]
+        assert len(mode_events) > 0
+        assert client.thermostats["103"].mode == 0
 
 
 class TestClientListenLoopEdgeCases:

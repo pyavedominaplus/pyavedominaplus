@@ -75,11 +75,16 @@ CMD_THERMOSTAT_SET_OFF = "TOO"  # Set thermostat local off (standard)
 CMD_THERMOSTAT_SET_OFF_TS01 = "TUU"  # Set thermostat local off (TS01 type)
 CMD_THERMOSTAT_KEYBOARD_LOCK = "TTK"  # Toggle thermostat keyboard lock
 
-# Light sub-command values (used with CMD_LIGHT_COMMAND)
+# Light sub-command values (used with CMD_LIGHT_COMMAND / EBI)
 LIGHT_CMD_TOGGLE = "10"  # Toggle light on/off (step)
 LIGHT_CMD_ON = "11"  # Turn light on
 LIGHT_CMD_OFF = "12"  # Turn light off
+
+# Dimmer sub-command values (used with CMD_LIGHT_COMMAND / EBI)
+# Dimmers use different sub-commands than regular lights
 DIMMER_CMD_STEP = "2"  # Dimmer step (toggle)
+DIMMER_CMD_ON = "3"  # Turn dimmer on
+DIMMER_CMD_OFF = "4"  # Turn dimmer off
 
 # Shutter sub-command values (used with CMD_SHUTTER_COMMAND)
 SHUTTER_CMD_OPEN = "8"  # Open/raise shutter
@@ -118,6 +123,11 @@ SHUTTER_STATUS_CLOSING = 4
 SEASON_SUMMER = 0
 SEASON_WINTER = 1
 SEASON_ALL = 2
+
+# Thermostat modes
+THERMOSTAT_MODE_AUTO = 0  # Automatic (follows built-in schedule)
+THERMOSTAT_MODE_MANUAL = 1  # Manual (user-set temperature)
+THERMOSTAT_MODE_ANTIFREEZE = 0x1F  # Antifreeze protection (set by system)
 
 # Connection statuses
 CONN_STATUS_OPEN = "OPEN"

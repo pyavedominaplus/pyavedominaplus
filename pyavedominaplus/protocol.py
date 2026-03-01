@@ -101,11 +101,14 @@ def decode_message(raw: bytes) -> list[dict]:
 def encode_light_command(device_id: str, sub_command: str) -> bytes:
     """Encode a light/energy on/off/toggle command (EBI).
 
-    sub_command values:
+    sub_command values for lights:
         "10" = toggle on/off
         "11" = turn on
         "12" = turn off
+    sub_command values for dimmers:
         "2"  = dimmer step (toggle)
+        "3"  = dimmer on
+        "4"  = dimmer off
     """
     return encode_message("EBI", [device_id, sub_command])
 

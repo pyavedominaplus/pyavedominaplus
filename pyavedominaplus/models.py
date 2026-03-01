@@ -20,6 +20,9 @@ from .const import (
     SHUTTER_STATUS_OPENING,
     SHUTTER_STATUS_CLOSED,
     SHUTTER_STATUS_CLOSING,
+    THERMOSTAT_MODE_AUTO,
+    THERMOSTAT_MODE_ANTIFREEZE,
+    THERMOSTAT_MODE_MANUAL,
 )
 
 
@@ -170,6 +173,18 @@ class DominaThermostat:
     def is_off(self) -> bool:
         return self.local_off == 1
 
+    @property
+    def is_auto_mode(self) -> bool:
+        return self.mode == THERMOSTAT_MODE_AUTO
+
+    @property
+    def is_manual_mode(self) -> bool:
+        return self.mode == THERMOSTAT_MODE_MANUAL
+
+    @property
+    def is_antifreeze_mode(self) -> bool:
+        return self.mode == THERMOSTAT_MODE_ANTIFREEZE
+
     def update_temperature(self, raw_value: str) -> None:
         """Update temperature from raw protocol value (tenths of degree)."""
         self.temperature = int(raw_value) / 10.0
@@ -188,6 +203,18 @@ class DominaThermostat:
         Record format: [fan_on, fan_level, configuration, offset,
                         season_bits, temperature, mode, set_point,
                         antifreeze, local_off]
+
+        Configuration bits:
+            bit 0     : antifreeze capability
+            bits 1-3  : thermostat type (0=ABTM03B, 1=ABTM_SO, 2=ABTMH_SO,
+                        3=44CRTW, 4=ABTM03C, 5=ABCRT)
+            bit 5     : IoT style thermostat
+            bit 6     : keyboard lock
+            bit 7     : window sensor visibility
+
+        Season bits:
+            bit 0     : season (0=summer, 1=winter)
+            bit 4     : humidity probe enabled
         """
         if not records or not records[0] or len(records[0]) < 10:
             return
@@ -201,6 +228,7 @@ class DominaThermostat:
         self.offset = int(r[3]) / 10.0
         season_bits = int(r[4])
         self.season = season_bits & 0x01
+        self.humidity_enabled = bool(season_bits & 0x10)
         if self.season == 1:
             self.fan_level += 128
         self.temperature = int(r[5]) / 10.0
@@ -210,7 +238,13 @@ class DominaThermostat:
             self.mode = 0x1F  # Antifreeze mode
         self.local_off = int(r[9])
         self.antifreeze = self.configuration % 2
-        # Check keyboard lock and window visibility from configuration
+        # Extract thermostat type from configuration bits 1-3
+        # Types 2 (ABTMH_SO), 3 (44CRTW), 5 (ABCRT) support humidity probes
+        thermostat_type = (self.configuration & 0x0E) >> 1
+        if thermostat_type == 2:
+            self.humidity_enabled = True
+        elif thermostat_type in (3, 5) and self.humidity_enabled:
+            pass  # Already set from season_bits
         self.keyboard_lock = (self.configuration & 0x40) >> 6
         self.window_visibility = (self.configuration & 0x80) >> 7
 

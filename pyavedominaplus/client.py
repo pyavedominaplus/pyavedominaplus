@@ -33,19 +33,28 @@ from .const import (
     CONN_STATUS_OPEN,
     DEFAULT_WS_PORT,
     DEVICE_TYPE_THERMOSTAT,
+    DIMMER_CMD_OFF,
+    DIMMER_CMD_ON,
     DIMMER_CMD_STEP,
     LIGHT_CMD_OFF,
     LIGHT_CMD_ON,
     LIGHT_CMD_TOGGLE,
     SHUTTER_CMD_CLOSE,
     SHUTTER_CMD_OPEN,
+    THERMOSTAT_MODE_AUTO,
+    THERMOSTAT_MODE_MANUAL,
     UPD_DEVICE_STATUS,
     UPD_HUMIDITY,
     UPD_RGB,
     UPD_THERMOSTAT,
+    UPD_THERMOSTAT_FANLEVEL_MAP,
     UPD_THERMOSTAT_KEYBOARD_LOCK,
+    UPD_THERMOSTAT_LOCAL_OFF_MAP,
     UPD_THERMOSTAT_MODE,
+    UPD_THERMOSTAT_OFFSET_MAP,
+    UPD_THERMOSTAT_SEASON_MAP,
     UPD_THERMOSTAT_SETPOINT,
+    UPD_THERMOSTAT_TEMP_MAP,
     UPD_THERMOSTAT_WINDOW,
 )
 from .models import (
@@ -224,6 +233,22 @@ class AVEDominaClient:
         """Toggle a light or energy device on/off."""
         await self.send_command(CMD_LIGHT_COMMAND, [device_id, LIGHT_CMD_TOGGLE])
 
+    async def turn_on_dimmer(self, device_id: str) -> None:
+        """Turn on a dimmer.
+
+        Dimmers use different EBI sub-commands than regular lights:
+        "3" for on instead of "11".
+        """
+        await self.send_command(CMD_LIGHT_COMMAND, [device_id, DIMMER_CMD_ON])
+
+    async def turn_off_dimmer(self, device_id: str) -> None:
+        """Turn off a dimmer.
+
+        Dimmers use different EBI sub-commands than regular lights:
+        "4" for off instead of "12".
+        """
+        await self.send_command(CMD_LIGHT_COMMAND, [device_id, DIMMER_CMD_OFF])
+
     async def set_dimmer_level(self, device_id: str, level: int) -> None:
         """Set a dimmer to a specific level (0-31)."""
         level = max(0, min(31, level))
@@ -267,6 +292,30 @@ class AVEDominaClient:
         )
         await self.send_command(cmd, [device_id, str(thermo.local_off)])
 
+    async def turn_on_thermostat(self, device_id: str) -> None:
+        """Turn on a thermostat (clear local off state).
+
+        Only sends the toggle command if the thermostat is currently off.
+        The protocol uses a toggle (TOO/TUU) that sends the current
+        local_off value and the server inverts it.
+        """
+        thermo = self._thermostats.get(device_id)
+        if not thermo or not thermo.is_off:
+            return
+        await self.toggle_thermostat_local_off(device_id)
+
+    async def turn_off_thermostat(self, device_id: str) -> None:
+        """Turn off a thermostat (set local off state).
+
+        Only sends the toggle command if the thermostat is currently on.
+        The protocol uses a toggle (TOO/TUU) that sends the current
+        local_off value and the server inverts it.
+        """
+        thermo = self._thermostats.get(device_id)
+        if not thermo or thermo.is_off:
+            return
+        await self.toggle_thermostat_local_off(device_id)
+
     async def toggle_thermostat_keyboard_lock(self, device_id: str) -> None:
         """Toggle a thermostat's keyboard lock."""
         await self.send_command(CMD_THERMOSTAT_KEYBOARD_LOCK, [device_id])
@@ -296,6 +345,23 @@ class AVEDominaClient:
             CMD_SET_THERMOSTAT_STATUS,
             [device_id],
             [[str(season), str(thermo.mode), str(raw_sp)]],
+        )
+
+    async def set_thermostat_mode(self, device_id: str, mode: int) -> None:
+        """Set a thermostat's mode.
+
+        mode: 0 = automatic (follows built-in schedule),
+              1 = manual (user-set temperature).
+        Sends STS with the current season and set point.
+        """
+        thermo = self._thermostats.get(device_id)
+        if not thermo:
+            return
+        raw_sp = int(thermo.set_point * 10)
+        await self.send_command(
+            CMD_SET_THERMOSTAT_STATUS,
+            [device_id],
+            [[str(thermo.season), str(mode), str(raw_sp)]],
         )
 
     async def _listen_loop(self) -> None:
@@ -537,12 +603,20 @@ class AVEDominaClient:
         elif upd_type == UPD_THERMOSTAT_MODE:
             if len(parameters) >= 3:
                 device_id = parameters[1]
+                raw_mode = parameters[2]
+                # TM sends mode as "M" (manual=1) or "A" (auto=0)
+                if raw_mode == "M":
+                    mode_int = THERMOSTAT_MODE_MANUAL
+                elif raw_mode == "A":
+                    mode_int = THERMOSTAT_MODE_AUTO
+                else:
+                    mode_int = int(raw_mode)
                 thermo = self._thermostats.get(device_id)
                 if thermo:
-                    thermo.mode = int(parameters[2])
+                    thermo.mode = mode_int
                 self._notify_update(
                     "thermostat_mode",
-                    {"device_id": device_id, "mode": parameters[2]},
+                    {"device_id": device_id, "mode": mode_int},
                 )
 
         elif upd_type == UPD_THERMOSTAT_KEYBOARD_LOCK:
@@ -560,21 +634,105 @@ class AVEDominaClient:
                     thermo.window_state = int(parameters[2])
 
         elif upd_type == UPD_HUMIDITY:
-            if len(parameters) >= 11:
+            if len(parameters) >= 6:
                 device_id = parameters[1]
                 thermo = self._thermostats.get(device_id)
                 if thermo:
+                    thermo.humidity_enabled = True
                     thermo.humidity_value = int(parameters[2])
-                    thermo.humidity_threshold_l = int(parameters[3])
-                    thermo.humidity_threshold_m = int(parameters[4])
-                    thermo.humidity_threshold_h = int(parameters[5])
+                    if len(parameters) >= 11:
+                        thermo.humidity_threshold_l = int(parameters[3])
+                        thermo.humidity_threshold_m = int(parameters[4])
+                        thermo.humidity_threshold_h = int(parameters[5])
                 self._notify_update(
                     "humidity",
                     {"device_id": device_id, "humidity": int(parameters[2])},
                 )
 
+        elif upd_type == UPD_THERMOSTAT_LOCAL_OFF_MAP:
+            # TLO: thermostat local off from map command
+            # Format: TLO, map_command_id, value (INVERTED: 0->1, 1->0)
+            if len(parameters) >= 3:
+                device_id = self._find_device_by_map_cmd(parameters[1])
+                if device_id:
+                    # Value is inverted compared to WT/Z
+                    raw = int(parameters[2])
+                    local_off = 0 if raw else 1
+                    thermo = self._thermostats.get(device_id)
+                    if thermo:
+                        thermo.local_off = local_off
+                    self._notify_update(
+                        "thermostat_local_off",
+                        {"device_id": device_id, "local_off": str(local_off)},
+                    )
+
+        elif upd_type == UPD_THERMOSTAT_SEASON_MAP:
+            # TS: thermostat season from map command
+            if len(parameters) >= 3:
+                device_id = self._find_device_by_map_cmd(parameters[1])
+                if device_id:
+                    thermo = self._thermostats.get(device_id)
+                    if thermo:
+                        thermo.season = int(parameters[2])
+                    self._notify_update(
+                        "thermostat_season",
+                        {"device_id": device_id, "season": parameters[2]},
+                    )
+
+        elif upd_type == UPD_THERMOSTAT_TEMP_MAP:
+            # TT: thermostat temperature from map command
+            if len(parameters) >= 3:
+                device_id = self._find_device_by_map_cmd(parameters[1])
+                if device_id:
+                    thermo = self._thermostats.get(device_id)
+                    if thermo:
+                        thermo.update_temperature(parameters[2])
+                    self._notify_update(
+                        "thermostat_temperature",
+                        {"device_id": device_id, "temperature": parameters[2]},
+                    )
+
+        elif upd_type == UPD_THERMOSTAT_OFFSET_MAP:
+            # TO: thermostat offset from map command
+            if len(parameters) >= 3:
+                device_id = self._find_device_by_map_cmd(parameters[1])
+                if device_id:
+                    thermo = self._thermostats.get(device_id)
+                    if thermo:
+                        thermo.update_offset(parameters[2])
+                    self._notify_update(
+                        "thermostat_offset",
+                        {"device_id": device_id, "offset": parameters[2]},
+                    )
+
+        elif upd_type == UPD_THERMOSTAT_FANLEVEL_MAP:
+            # TL: thermostat fan level from map command
+            if len(parameters) >= 3:
+                device_id = self._find_device_by_map_cmd(parameters[1])
+                if device_id:
+                    thermo = self._thermostats.get(device_id)
+                    if thermo:
+                        thermo.fan_level = int(parameters[2])
+                    self._notify_update(
+                        "thermostat_fan_level",
+                        {"device_id": device_id, "fan_level": parameters[2]},
+                    )
+
         elif upd_type == UPD_RGB:
             self._notify_update("rgb", {"parameters": parameters})
+
+    def _find_device_by_map_cmd(self, map_command_id: str) -> str | None:
+        """Find a device_id from a map command ID.
+
+        Map-based UPD updates (TLO, TS, TT, TO, TL) reference map command IDs
+        instead of device IDs. This looks up the device through the area/map
+        command structure.
+        """
+        for area in self._areas.values():
+            for cmd in area.map_commands:
+                if cmd.command_id == map_command_id:
+                    return cmd.device_id
+        return None
 
     async def _handle_thermo_upd(self, parameters: list[str]) -> None:
         """Handle WT (thermostat) sub-updates."""

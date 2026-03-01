@@ -194,6 +194,22 @@ class TestDominaThermostat:
         thermo = DominaThermostat(id="103", name="LR", local_off=1)
         assert thermo.is_off
 
+    def test_mode_properties(self):
+        thermo = DominaThermostat(id="103", name="LR", mode=0)
+        assert thermo.is_auto_mode
+        assert not thermo.is_manual_mode
+        assert not thermo.is_antifreeze_mode
+
+        thermo.mode = 1
+        assert thermo.is_manual_mode
+        assert not thermo.is_auto_mode
+        assert not thermo.is_antifreeze_mode
+
+        thermo.mode = 0x1F
+        assert thermo.is_antifreeze_mode
+        assert not thermo.is_auto_mode
+        assert not thermo.is_manual_mode
+
     def test_update_temperature(self):
         thermo = DominaThermostat(id="103", name="LR")
         thermo.update_temperature("215")
@@ -440,6 +456,31 @@ class TestDominaThermostatExtended:
         records = [["1", "2", "7", "5", "1", "215", "1", "210", "0", "0"]]
         thermo.update_from_wts(records)
         assert thermo.antifreeze == 1
+
+    def test_update_from_wts_humidity_enabled_from_season_bits(self):
+        """Test WTS extracts humidity_enabled from season_bits bit 4."""
+        thermo = DominaThermostat(id="103", name="LR")
+        # season_bits=0x11 (17): bit 0=winter, bit 4=humidity_enabled
+        records = [["1", "2", "6", "5", "17", "215", "1", "210", "0", "0"]]
+        thermo.update_from_wts(records)
+        assert thermo.season == 1  # Winter
+        assert thermo.humidity_enabled is True
+
+    def test_update_from_wts_humidity_disabled(self):
+        """Test WTS with humidity_enabled not set in season_bits."""
+        thermo = DominaThermostat(id="103", name="LR")
+        # season_bits=1: only season bit, no humidity
+        records = [["1", "2", "6", "5", "1", "215", "1", "210", "0", "0"]]
+        thermo.update_from_wts(records)
+        assert thermo.humidity_enabled is False
+
+    def test_update_from_wts_thermostat_type_abtmh_so(self):
+        """Test WTS with ABTMH_SO thermostat type (2) always enables humidity."""
+        thermo = DominaThermostat(id="103", name="LR")
+        # configuration bits 1-3 = 2 (ABTMH_SO): config = 0b00000100 = 4
+        records = [["1", "2", "4", "5", "0", "215", "1", "210", "0", "0"]]
+        thermo.update_from_wts(records)
+        assert thermo.humidity_enabled is True
 
     def test_update_from_wts_local_off(self):
         """Test WTS with local_off set."""
