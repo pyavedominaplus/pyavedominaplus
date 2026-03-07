@@ -112,6 +112,19 @@ class TestDominaDevice:
         assert dev.is_closing
         assert not dev.is_closed
 
+    def test_shutter_is_stopped(self):
+        dev = DominaDevice(
+            id="102",
+            name="Window",
+            device_type=DEVICE_TYPE_SHUTTER,
+            current_value=5,
+        )
+        assert not dev.is_open
+        assert not dev.is_opening
+        assert not dev.is_closing
+        assert not dev.is_closed
+        assert dev.is_stopped
+
     def test_shutter_states_non_shutter_devices(self):
         # Test that shutter state properties return False for non-shutter devices
         dev = DominaDevice(
@@ -121,6 +134,7 @@ class TestDominaDevice:
         assert not dev.is_opening
         assert not dev.is_closing
         assert not dev.is_closed
+        assert not dev.is_stopped
 
     def test_thermostat_device(self):
         dev = DominaDevice(

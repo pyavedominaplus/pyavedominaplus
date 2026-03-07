@@ -21,7 +21,7 @@ async def mock_server():
 @pytest_asyncio.fixture
 async def client(mock_server):
     """Create and connect a client to the mock server."""
-    c = AVEDominaClient(host="127.0.0.1", port=mock_server.port)
+    c = AVEDominaClient(host="127.0.0.1", port=mock_server.port, command_delay=0)
     await c.connect()
     yield c
     await c.disconnect()
@@ -32,7 +32,9 @@ class TestClientConnection:
 
     async def test_connect_disconnect(self, mock_server):
         """Test basic connect and disconnect."""
-        client = AVEDominaClient(host="127.0.0.1", port=mock_server.port)
+        client = AVEDominaClient(
+            host="127.0.0.1", port=mock_server.port, command_delay=0
+        )
         await client.connect()
         assert client.connected
         await client.disconnect()
@@ -46,7 +48,9 @@ class TestClientConnection:
     async def test_connection_callback(self, mock_server):
         """Test connection status callback."""
         statuses = []
-        client = AVEDominaClient(host="127.0.0.1", port=mock_server.port)
+        client = AVEDominaClient(
+            host="127.0.0.1", port=mock_server.port, command_delay=0
+        )
         client.register_connection_callback(lambda s: statuses.append(s))
         await client.connect()
         assert "OPEN" in statuses
@@ -91,6 +95,15 @@ class TestClientInitialization:
         area = client.areas.get("1")
         assert area is not None
         assert len(area.map_commands) == 4
+
+    async def test_device_statuses_populated_after_init(self, client, mock_server):
+        """Test that device statuses are populated when wait_for_initialization returns."""
+        mock_server.device_statuses["100"] = 1  # light on
+        mock_server.device_statuses["102"] = 3  # shutter closed
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+        assert client.devices["100"].current_value == 1
+        assert client.devices["102"].current_value == 3
 
 
 class TestClientDeviceControl:
@@ -162,6 +175,139 @@ class TestClientDeviceControl:
         await client.close_shutter("102")
         await asyncio.sleep(0.2)
         assert mock_server.device_statuses["102"] == 4  # CLOSING
+
+    async def test_stop_shutter_while_opening(self, client, mock_server):
+        """Stop shutter while opening re-sends open command, status becomes 5."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+
+        await client.open_shutter("102")
+        await asyncio.sleep(0.2)
+        assert mock_server.device_statuses["102"] == 2  # OPENING
+
+        await client.stop_shutter("102")
+        await asyncio.sleep(0.2)
+        assert mock_server.device_statuses["102"] == 5  # STOPPED
+        device = client.devices["102"]
+        assert device.is_stopped
+
+    async def test_stop_shutter_while_closing(self, client, mock_server):
+        """Stop shutter while closing re-sends close command, status becomes 5."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+
+        await client.close_shutter("102")
+        await asyncio.sleep(0.2)
+        assert mock_server.device_statuses["102"] == 4  # CLOSING
+
+        await client.stop_shutter("102")
+        await asyncio.sleep(0.2)
+        assert mock_server.device_statuses["102"] == 5  # STOPPED
+        device = client.devices["102"]
+        assert device.is_stopped
+
+    async def test_stop_shutter_when_not_moving(self, client, mock_server):
+        """Stop shutter when not moving does nothing."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+        await asyncio.sleep(0.5)
+
+        cmds_before = len(mock_server.received_commands)
+        await client.stop_shutter("102")
+        await asyncio.sleep(0.2)
+        # No EAI command should have been sent
+        eai_cmds = [
+            c
+            for c in mock_server.received_commands[cmds_before:]
+            if c["command"] == "EAI"
+        ]
+        assert len(eai_cmds) == 0
+
+    async def test_shutter_transitions_to_open(self):
+        """Shutter transitions from OPENING to OPEN after transition time."""
+        server = MockDominaServer(shutter_transition_time=0.3)
+        await server.start()
+        try:
+            client = AVEDominaClient(
+                host="127.0.0.1",
+                port=server.port,
+                auto_reconnect=False,
+                command_delay=0,
+            )
+            await client.connect()
+            await client.initialize()
+            await client.wait_for_initialization(timeout=5.0)
+
+            await client.open_shutter("102")
+            await asyncio.sleep(0.1)
+            assert server.device_statuses["102"] == 2  # OPENING
+
+            # Wait for transition
+            await asyncio.sleep(0.5)
+            assert server.device_statuses["102"] == 1  # OPEN
+            assert client.devices["102"].is_open
+
+            await client.disconnect()
+        finally:
+            await server.stop()
+
+    async def test_shutter_transitions_to_closed(self):
+        """Shutter transitions from CLOSING to CLOSED after transition time."""
+        server = MockDominaServer(shutter_transition_time=0.3)
+        await server.start()
+        try:
+            client = AVEDominaClient(
+                host="127.0.0.1",
+                port=server.port,
+                auto_reconnect=False,
+                command_delay=0,
+            )
+            await client.connect()
+            await client.initialize()
+            await client.wait_for_initialization(timeout=5.0)
+
+            await client.close_shutter("102")
+            await asyncio.sleep(0.1)
+            assert server.device_statuses["102"] == 4  # CLOSING
+
+            await asyncio.sleep(0.5)
+            assert server.device_statuses["102"] == 3  # CLOSED
+            assert client.devices["102"].is_closed
+
+            await client.disconnect()
+        finally:
+            await server.stop()
+
+    async def test_shutter_stop_cancels_transition(self):
+        """Stopping a shutter cancels the pending transition to final state."""
+        server = MockDominaServer(shutter_transition_time=0.5)
+        await server.start()
+        try:
+            client = AVEDominaClient(
+                host="127.0.0.1",
+                port=server.port,
+                auto_reconnect=False,
+                command_delay=0,
+            )
+            await client.connect()
+            await client.initialize()
+            await client.wait_for_initialization(timeout=5.0)
+
+            await client.open_shutter("102")
+            await asyncio.sleep(0.1)
+            assert server.device_statuses["102"] == 2  # OPENING
+
+            await client.stop_shutter("102")
+            await asyncio.sleep(0.1)
+            assert server.device_statuses["102"] == 5  # STOPPED
+
+            # Wait past transition time — should stay stopped
+            await asyncio.sleep(0.7)
+            assert server.device_statuses["102"] == 5  # Still STOPPED
+
+            await client.disconnect()
+        finally:
+            await server.stop()
 
     async def test_activate_scenario(self, client, mock_server):
         """Test activating a scenario via ES command using map command lookup."""
@@ -551,7 +697,9 @@ class TestClientUpdates:
     async def test_unregister_connection_callback(self, mock_server):
         """Test unregistering a connection callback."""
         statuses = []
-        client = AVEDominaClient(host="127.0.0.1", port=mock_server.port)
+        client = AVEDominaClient(
+            host="127.0.0.1", port=mock_server.port, command_delay=0
+        )
         unregister = client.register_connection_callback(lambda s: statuses.append(s))
 
         await client.connect()
@@ -582,7 +730,9 @@ class TestClientErrorHandling:
 
     async def test_set_thermostat_nonexistent(self, mock_server):
         """Test setting thermostat set point for non-existent thermostat is a no-op."""
-        client = AVEDominaClient(host="127.0.0.1", port=mock_server.port)
+        client = AVEDominaClient(
+            host="127.0.0.1", port=mock_server.port, command_delay=0
+        )
         await client.connect()
         await client.initialize()
         await client.wait_for_initialization(timeout=5.0)
@@ -594,7 +744,9 @@ class TestClientErrorHandling:
 
     async def test_set_thermostat_season_nonexistent(self, mock_server):
         """Test setting thermostat season for non-existent thermostat is a no-op."""
-        client = AVEDominaClient(host="127.0.0.1", port=mock_server.port)
+        client = AVEDominaClient(
+            host="127.0.0.1", port=mock_server.port, command_delay=0
+        )
         await client.connect()
         await client.initialize()
         await client.wait_for_initialization(timeout=5.0)
@@ -604,7 +756,9 @@ class TestClientErrorHandling:
 
     async def test_dimmer_level_clamped_negative(self, mock_server):
         """Test that negative dimmer level is clamped to 0."""
-        client = AVEDominaClient(host="127.0.0.1", port=mock_server.port)
+        client = AVEDominaClient(
+            host="127.0.0.1", port=mock_server.port, command_delay=0
+        )
         await client.connect()
         await client.initialize()
         await client.wait_for_initialization(timeout=5.0)
@@ -616,7 +770,9 @@ class TestClientErrorHandling:
 
     async def test_wait_for_initialization_timeout(self, mock_server):
         """Test that wait_for_initialization returns False on timeout."""
-        client = AVEDominaClient(host="127.0.0.1", port=mock_server.port)
+        client = AVEDominaClient(
+            host="127.0.0.1", port=mock_server.port, command_delay=0
+        )
         await client.connect()
         # Don't call initialize - just wait for timeout
         result = await client.wait_for_initialization(timeout=0.1)
@@ -634,7 +790,10 @@ class TestClientSessionManagement:
         session = aiohttp.ClientSession()
         try:
             client = AVEDominaClient(
-                host="127.0.0.1", port=mock_server.port, session=session
+                host="127.0.0.1",
+                port=mock_server.port,
+                session=session,
+                command_delay=0,
             )
             assert not client._owns_session
             await client.connect()
@@ -647,7 +806,9 @@ class TestClientSessionManagement:
 
     async def test_owned_session_closed_on_disconnect(self, mock_server):
         """Test that an internally created session is closed on disconnect."""
-        client = AVEDominaClient(host="127.0.0.1", port=mock_server.port)
+        client = AVEDominaClient(
+            host="127.0.0.1", port=mock_server.port, command_delay=0
+        )
         assert client._owns_session
         await client.connect()
         assert client.connected
@@ -716,7 +877,7 @@ class TestClientCallbackExceptions:
             raise RuntimeError("Connection callback error")
 
         statuses = []
-        c = AVEDominaClient(host="127.0.0.1", port=mock_server.port)
+        c = AVEDominaClient(host="127.0.0.1", port=mock_server.port, command_delay=0)
         c.register_connection_callback(bad_callback)
         c.register_connection_callback(lambda s: statuses.append(s))
 
@@ -1058,7 +1219,7 @@ class TestClientNewControlMethods:
 
     async def test_toggle_thermostat_local_off_vmc_daikin(self, mock_server):
         """toggle_thermostat_local_off sends TUU for a VMC Daikin thermostat."""
-        c = AVEDominaClient(host="127.0.0.1", port=mock_server.port)
+        c = AVEDominaClient(host="127.0.0.1", port=mock_server.port, command_delay=0)
         await c.connect()
         try:
             # Inject a VMC Daikin thermostat (id offset by 10,000,000)
@@ -1092,10 +1253,9 @@ class TestClientNewControlMethods:
         assert ttk_cmds[-1]["parameters"] == ["103"]
 
     async def test_turn_off_thermostat(self, client, mock_server):
-        """turn_off_thermostat sends TOO when thermostat is on (local_off=0)."""
+        """turn_off_thermostat sends TOO with 0 (server inverts to 1=OFF)."""
         await client.initialize()
         await client.wait_for_initialization(timeout=5.0)
-        # Thermostat 103 starts with local_off=0 (ON)
         assert client.thermostats["103"].local_off == 0
         mock_server.received_commands.clear()
 
@@ -1105,28 +1265,27 @@ class TestClientNewControlMethods:
         too_cmds = [c for c in mock_server.received_commands if c["command"] == "TOO"]
         assert len(too_cmds) > 0
         assert too_cmds[-1]["parameters"] == ["103", "0"]
-        # Server toggles local_off: 0 -> 1
         assert client.thermostats["103"].local_off == 1
 
     async def test_turn_off_thermostat_already_off(self, client, mock_server):
-        """turn_off_thermostat is a no-op when thermostat is already off."""
+        """turn_off_thermostat is idempotent — sends TOO even when already off."""
         await client.initialize()
         await client.wait_for_initialization(timeout=5.0)
-        # Set thermostat to off
         client.thermostats["103"].local_off = 1
         mock_server.received_commands.clear()
 
         await client.turn_off_thermostat("103")
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.3)
 
         too_cmds = [c for c in mock_server.received_commands if c["command"] == "TOO"]
-        assert len(too_cmds) == 0
+        assert len(too_cmds) > 0
+        # Always sends "0"; server inverts to 1 (OFF)
+        assert too_cmds[-1]["parameters"] == ["103", "0"]
 
     async def test_turn_on_thermostat(self, client, mock_server):
-        """turn_on_thermostat sends TOO when thermostat is off (local_off=1)."""
+        """turn_on_thermostat sends TOO with 1 (server inverts to 0=ON)."""
         await client.initialize()
         await client.wait_for_initialization(timeout=5.0)
-        # Set thermostat to off first
         client.thermostats["103"].local_off = 1
         mock_server.received_commands.clear()
 
@@ -1136,31 +1295,31 @@ class TestClientNewControlMethods:
         too_cmds = [c for c in mock_server.received_commands if c["command"] == "TOO"]
         assert len(too_cmds) > 0
         assert too_cmds[-1]["parameters"] == ["103", "1"]
-        # Server toggles local_off: 1 -> 0
         assert client.thermostats["103"].local_off == 0
 
     async def test_turn_on_thermostat_already_on(self, client, mock_server):
-        """turn_on_thermostat is a no-op when thermostat is already on."""
+        """turn_on_thermostat is idempotent — sends TOO even when already on."""
         await client.initialize()
         await client.wait_for_initialization(timeout=5.0)
-        # Thermostat 103 starts with local_off=0 (ON)
         assert client.thermostats["103"].local_off == 0
         mock_server.received_commands.clear()
 
         await client.turn_on_thermostat("103")
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.3)
 
         too_cmds = [c for c in mock_server.received_commands if c["command"] == "TOO"]
-        assert len(too_cmds) == 0
+        assert len(too_cmds) > 0
+        # Always sends "1"; server inverts to 0 (ON)
+        assert too_cmds[-1]["parameters"] == ["103", "1"]
 
     async def test_turn_on_thermostat_nonexistent(self, client, mock_server):
-        """turn_on_thermostat is a no-op for unknown device."""
+        """turn_on_thermostat sends command even for unknown device."""
         await client.initialize()
         await client.wait_for_initialization(timeout=5.0)
         await client.turn_on_thermostat("999")
 
     async def test_turn_off_thermostat_nonexistent(self, client, mock_server):
-        """turn_off_thermostat is a no-op for unknown device."""
+        """turn_off_thermostat sends command even for unknown device."""
         await client.initialize()
         await client.wait_for_initialization(timeout=5.0)
         await client.turn_off_thermostat("999")
@@ -1263,7 +1422,12 @@ class TestClientListenLoopEdgeCases:
     async def test_server_stop_triggers_error_callback(self, mock_server):
         """When the server closes the connection, the client emits an ERROR status."""
         statuses = []
-        c = AVEDominaClient(host="127.0.0.1", port=mock_server.port)
+        c = AVEDominaClient(
+            host="127.0.0.1",
+            port=mock_server.port,
+            auto_reconnect=False,
+            command_delay=0,
+        )
         c.register_connection_callback(lambda s: statuses.append(s))
         await c.connect()
         assert "OPEN" in statuses
@@ -1309,3 +1473,627 @@ class TestClientListenLoopEdgeCases:
 
         # Client should still be connected after the caught exception
         assert client.connected
+
+    async def test_listen_loop_closed_message(self, client, mock_server):
+        """Client handles CLOSED/CLOSING/ERROR WebSocket message types gracefully."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+
+        # Stopping the server will cause the WebSocket to close,
+        # triggering the CLOSED/CLOSING branch in the listen loop
+        statuses = []
+        client.register_connection_callback(lambda s: statuses.append(s))
+        await mock_server.stop()
+        await asyncio.sleep(0.5)
+
+        assert "ERROR" in statuses
+
+    async def test_listen_loop_not_running_break(self, client, mock_server):
+        """Listen loop breaks when _running is set to False."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+
+        # Disconnect sets _running = False, which should cause the loop to break
+        await client.disconnect()
+        await asyncio.sleep(0.2)
+        assert not client.connected
+
+
+class TestThermostatFunctionAndRequest:
+    """Tests for TF and TR update handlers."""
+
+    async def test_thermostat_function_update(self, client, mock_server):
+        """TF update emits thermostat_function event with parameters."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+
+        events = []
+        client.register_update_callback(lambda t, d: events.append((t, d)))
+
+        await mock_server.send_update("upd", ["TF", "103", "5", "10"])
+        await asyncio.sleep(0.2)
+
+        tf_events = [e for e in events if e[0] == "thermostat_function"]
+        assert len(tf_events) == 1
+        assert tf_events[0][1]["device_id"] == "103"
+        assert tf_events[0][1]["parameters"] == ["5", "10"]
+
+    async def test_thermostat_function_short_params(self, client, mock_server):
+        """TF update with too few parameters is ignored."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+
+        events = []
+        client.register_update_callback(lambda t, d: events.append((t, d)))
+
+        await mock_server.send_update("upd", ["TF", "103"])
+        await asyncio.sleep(0.2)
+
+        tf_events = [e for e in events if e[0] == "thermostat_function"]
+        assert len(tf_events) == 0
+
+    async def test_thermostat_request_update(self, client, mock_server):
+        """TR update emits thermostat_request event with value."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+
+        events = []
+        client.register_update_callback(lambda t, d: events.append((t, d)))
+
+        await mock_server.send_update("upd", ["TR", "103", "42"])
+        await asyncio.sleep(0.2)
+
+        tr_events = [e for e in events if e[0] == "thermostat_request"]
+        assert len(tr_events) == 1
+        assert tr_events[0][1]["device_id"] == "103"
+        assert tr_events[0][1]["value"] == "42"
+
+    async def test_thermostat_request_short_params(self, client, mock_server):
+        """TR update with too few parameters is ignored."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+
+        events = []
+        client.register_update_callback(lambda t, d: events.append((t, d)))
+
+        await mock_server.send_update("upd", ["TR", "103"])
+        await asyncio.sleep(0.2)
+
+        tr_events = [e for e in events if e[0] == "thermostat_request"]
+        assert len(tr_events) == 0
+
+
+class TestResolveDeviceId:
+    """Tests for _resolve_device_id with direct device IDs vs map command IDs."""
+
+    async def test_resolve_by_thermostat_id(self, client, mock_server):
+        """_resolve_device_id returns the ID when it matches a thermostat."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+
+        # "103" is a thermostat, should resolve directly
+        result = client._resolve_device_id("103")
+        assert result == "103"
+
+    async def test_resolve_by_device_id(self, client, mock_server):
+        """_resolve_device_id returns the ID when it matches a non-thermostat device."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+
+        # "100" is a light (not a thermostat), should resolve via _devices
+        result = client._resolve_device_id("100")
+        assert result == "100"
+
+    async def test_resolve_by_map_command_id(self, client, mock_server):
+        """_resolve_device_id resolves via map command lookup."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+
+        # "8" is the map command ID for thermostat 103 (see mock_server.py)
+        result = client._resolve_device_id("8")
+        assert result == "103"
+
+    async def test_resolve_unknown_returns_none(self, client, mock_server):
+        """_resolve_device_id returns None for unknown IDs."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+
+        result = client._resolve_device_id("99999")
+        assert result is None
+
+    async def test_tlo_update_with_direct_device_id(self, client, mock_server):
+        """TLO update using a direct device ID (not map command) is handled."""
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+
+        events = []
+        client.register_update_callback(lambda t, d: events.append((t, d)))
+
+        # Send TLO with direct device ID "103" instead of map command ID
+        await mock_server.send_update("upd", ["TLO", "103", "1"])
+        await asyncio.sleep(0.2)
+
+        off_events = [e for e in events if e[0] == "thermostat_local_off"]
+        assert len(off_events) == 1
+        assert off_events[0][1]["device_id"] == "103"
+
+
+class TestListenLoopWSMsgTypes:
+    """Tests for _listen_loop handling of different WebSocket message types."""
+
+    async def test_listen_loop_ws_closed_msg(self, mock_server):
+        """Listen loop breaks on WSMsgType.CLOSED and emits ERROR status."""
+        from unittest.mock import AsyncMock, MagicMock
+        import aiohttp
+
+        client = AVEDominaClient(
+            host="127.0.0.1",
+            port=mock_server.port,
+            auto_reconnect=False,
+            command_delay=0,
+        )
+        await client.connect()
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+
+        statuses = []
+        client.register_connection_callback(lambda s: statuses.append(s))
+
+        # Replace _ws with a mock that yields a CLOSED message
+        closed_msg = MagicMock()
+        closed_msg.type = aiohttp.WSMsgType.CLOSED
+
+        async def mock_ws_iter():
+            yield closed_msg
+
+        # Cancel the existing listen task and run our own
+        if client._listen_task:
+            client._listen_task.cancel()
+            try:
+                await client._listen_task
+            except asyncio.CancelledError:
+                pass
+
+        original_ws = client._ws
+        mock_ws = AsyncMock()
+        mock_ws.__aiter__ = lambda self: mock_ws_iter()
+        client._ws = mock_ws
+        client._running = True
+
+        await client._listen_loop()
+
+        assert "ERROR" in statuses
+        client._ws = original_ws
+        await client.disconnect()
+
+    async def test_listen_loop_ws_error_msg(self, mock_server):
+        """Listen loop breaks on WSMsgType.ERROR."""
+        from unittest.mock import AsyncMock, MagicMock
+        import aiohttp
+
+        client = AVEDominaClient(
+            host="127.0.0.1",
+            port=mock_server.port,
+            auto_reconnect=False,
+            command_delay=0,
+        )
+        await client.connect()
+
+        statuses = []
+        client.register_connection_callback(lambda s: statuses.append(s))
+
+        error_msg = MagicMock()
+        error_msg.type = aiohttp.WSMsgType.ERROR
+
+        async def mock_ws_iter():
+            yield error_msg
+
+        if client._listen_task:
+            client._listen_task.cancel()
+            try:
+                await client._listen_task
+            except asyncio.CancelledError:
+                pass
+
+        mock_ws = AsyncMock()
+        mock_ws.__aiter__ = lambda self: mock_ws_iter()
+        original_ws = client._ws
+        client._ws = mock_ws
+        client._running = True
+
+        await client._listen_loop()
+
+        assert "ERROR" in statuses
+        client._ws = original_ws
+        await client.disconnect()
+
+    async def test_listen_loop_unknown_msg_type(self, mock_server):
+        """Listen loop ignores unknown message types and continues."""
+        from unittest.mock import AsyncMock, MagicMock
+        import aiohttp
+        from pyavedominaplus.protocol import encode_message
+
+        client = AVEDominaClient(
+            host="127.0.0.1",
+            port=mock_server.port,
+            auto_reconnect=False,
+            command_delay=0,
+        )
+        await client.connect()
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+
+        events = []
+        client.register_update_callback(lambda t, d: events.append((t, d)))
+
+        # First yield an unknown type (PING=0xa), then a valid binary, then stop
+        unknown_msg = MagicMock()
+        unknown_msg.type = aiohttp.WSMsgType.PING
+
+        valid_msg = MagicMock()
+        valid_msg.type = aiohttp.WSMsgType.BINARY
+        valid_msg.data = encode_message("upd", ["WS", "1", "100", "1"])
+
+        closed_msg = MagicMock()
+        closed_msg.type = aiohttp.WSMsgType.CLOSED
+
+        async def mock_ws_iter():
+            yield unknown_msg
+            yield valid_msg
+            yield closed_msg
+
+        if client._listen_task:
+            client._listen_task.cancel()
+            try:
+                await client._listen_task
+            except asyncio.CancelledError:
+                pass
+
+        mock_ws = AsyncMock()
+        mock_ws.__aiter__ = lambda self: mock_ws_iter()
+        original_ws = client._ws
+        client._ws = mock_ws
+        client._running = True
+
+        await client._listen_loop()
+
+        # The valid binary message should have been processed after the unknown one
+        status_events = [e for e in events if e[0] == "device_status"]
+        assert len(status_events) > 0
+        client._ws = original_ws
+        await client.disconnect()
+
+    async def test_listen_loop_not_running(self, mock_server):
+        """Listen loop breaks immediately when _running is False."""
+        from unittest.mock import AsyncMock, MagicMock
+        import aiohttp
+        from pyavedominaplus.protocol import encode_message
+
+        client = AVEDominaClient(
+            host="127.0.0.1", port=mock_server.port, command_delay=0
+        )
+        await client.connect()
+
+        valid_msg = MagicMock()
+        valid_msg.type = aiohttp.WSMsgType.BINARY
+        valid_msg.data = encode_message("upd", ["WS", "1", "100", "1"])
+
+        async def mock_ws_iter():
+            yield valid_msg
+
+        if client._listen_task:
+            client._listen_task.cancel()
+            try:
+                await client._listen_task
+            except asyncio.CancelledError:
+                pass
+
+        mock_ws = AsyncMock()
+        mock_ws.__aiter__ = lambda self: mock_ws_iter()
+        original_ws = client._ws
+        client._ws = mock_ws
+        client._running = False  # Not running — should break immediately
+
+        events = []
+        client.register_update_callback(lambda t, d: events.append((t, d)))
+
+        await client._listen_loop()
+
+        # Message should NOT have been processed
+        assert len(events) == 0
+        client._ws = original_ws
+        await client.disconnect()
+
+    async def test_listen_loop_exception(self, mock_server):
+        """Listen loop catches generic exceptions and emits ERROR status."""
+
+        client = AVEDominaClient(
+            host="127.0.0.1",
+            port=mock_server.port,
+            auto_reconnect=False,
+            command_delay=0,
+        )
+        await client.connect()
+
+        statuses = []
+        client.register_connection_callback(lambda s: statuses.append(s))
+
+        class RaisingAsyncIter:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise RuntimeError("connection lost")
+
+        if client._listen_task:
+            client._listen_task.cancel()
+            try:
+                await client._listen_task
+            except asyncio.CancelledError:
+                pass
+
+        original_ws = client._ws
+        client._ws = RaisingAsyncIter()
+        client._running = True
+
+        await client._listen_loop()
+
+        assert "ERROR" in statuses
+        client._ws = original_ws
+        await client.disconnect()
+
+
+class TestAutoReconnect:
+    """Tests for automatic reconnection with backoff."""
+
+    async def test_reconnect_after_server_drop(self, mock_server):
+        """Client reconnects automatically after server stops and restarts."""
+        port = mock_server.port
+        client = AVEDominaClient(
+            host="127.0.0.1",
+            port=port,
+            reconnect_interval=0.3,
+            max_reconnect_interval=1.0,
+            command_delay=0,
+        )
+        await client.connect()
+        await client.initialize()
+        ok = await client.wait_for_initialization(timeout=5.0)
+        assert ok
+
+        statuses = []
+        client.register_connection_callback(lambda s: statuses.append(s))
+
+        # Stop server — triggers ERROR + reconnect loop
+        await mock_server.stop()
+        await asyncio.sleep(0.5)
+        assert "ERROR" in statuses
+
+        # Restart server on the same port
+        server2 = MockDominaServer(port=port)
+        await server2.start()
+        try:
+            # Wait for reconnect
+            await asyncio.sleep(2.0)
+            assert "OPEN" in statuses
+            assert client.connected
+
+            # Verify re-initialization happened
+            ok = await client.wait_for_initialization(timeout=5.0)
+            assert ok
+        finally:
+            await client.disconnect()
+            await server2.stop()
+
+    async def test_reconnect_disabled(self, mock_server):
+        """No reconnect attempt when auto_reconnect=False."""
+        client = AVEDominaClient(
+            host="127.0.0.1",
+            port=mock_server.port,
+            auto_reconnect=False,
+            command_delay=0,
+        )
+        await client.connect()
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+
+        statuses = []
+        client.register_connection_callback(lambda s: statuses.append(s))
+
+        await mock_server.stop()
+        await asyncio.sleep(0.5)
+
+        assert "ERROR" in statuses
+        assert client._reconnect_task is None
+        assert statuses.count("OPEN") == 0
+        await client.disconnect()
+
+    async def test_disconnect_stops_reconnect(self, mock_server):
+        """Calling disconnect() cancels any pending reconnect."""
+        client = AVEDominaClient(
+            host="127.0.0.1",
+            port=mock_server.port,
+            reconnect_interval=5.0,
+            command_delay=0,
+        )
+        await client.connect()
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+
+        await mock_server.stop()
+        await asyncio.sleep(0.5)
+
+        # Reconnect task should be running (sleeping for 5s)
+        assert client._reconnect_task is not None
+        assert not client._reconnect_task.done()
+
+        # Disconnect should cancel it
+        await client.disconnect()
+        assert not client._running
+        assert client._reconnect_task is None
+
+    async def test_backoff_increases(self, mock_server):
+        """Reconnect delay doubles on each failure up to max."""
+        import unittest.mock
+
+        port = mock_server.port
+        client = AVEDominaClient(
+            host="127.0.0.1",
+            port=port,
+            reconnect_interval=0.1,
+            max_reconnect_interval=0.4,
+            command_delay=0,
+        )
+        await client.connect()
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+
+        reconnect_attempts = []
+        original_reconnect = client._reconnect_loop
+
+        async def tracking_reconnect():
+            """Wrap reconnect loop to count attempts via logging."""
+            await original_reconnect()
+
+        # Track reconnect warnings via log capture
+        with unittest.mock.patch("pyavedominaplus.client._LOGGER") as mock_logger:
+            mock_logger.info = unittest.mock.MagicMock(
+                side_effect=lambda msg, *args: (
+                    reconnect_attempts.append(args[0])
+                    if "Reconnecting in" in str(msg)
+                    else None
+                )
+            )
+            mock_logger.debug = unittest.mock.MagicMock()
+            mock_logger.warning = unittest.mock.MagicMock()
+            mock_logger.exception = unittest.mock.MagicMock()
+
+            # Stop server — reconnect attempts will fail
+            await mock_server.stop()
+            # Wait long enough for several retries: 0.1 + 0.2 + 0.4 ~= 0.7s
+            await asyncio.sleep(2.0)
+
+        # Should have multiple reconnect attempts with increasing delays
+        assert len(reconnect_attempts) >= 3
+        # Verify backoff: delays should increase
+        assert reconnect_attempts[0] < reconnect_attempts[1]
+        # Max should be capped
+        assert reconnect_attempts[-1] <= 0.4
+
+        await client.disconnect()
+
+    async def test_reconnect_resets_init_state(self, mock_server):
+        """Reconnect resets _lm_loaded, _ldi_loaded, _initialized."""
+        port = mock_server.port
+        client = AVEDominaClient(
+            host="127.0.0.1",
+            port=port,
+            reconnect_interval=0.3,
+            command_delay=0,
+        )
+        await client.connect()
+        await client.initialize()
+        ok = await client.wait_for_initialization(timeout=5.0)
+        assert ok
+        assert client._lm_loaded
+        assert client._ldi_loaded
+        assert client._initialized.is_set()
+
+        # Stop server — triggers reconnect which calls _reset_init_state
+        await mock_server.stop()
+        await asyncio.sleep(0.2)
+
+        # Start server back up on same port
+        server2 = MockDominaServer(port=port)
+        await server2.start()
+        try:
+            await asyncio.sleep(1.5)
+            # After successful reconnect, state should be re-initialized
+            ok = await client.wait_for_initialization(timeout=5.0)
+            assert ok
+            assert client._lm_loaded
+            assert client._ldi_loaded
+        finally:
+            await client.disconnect()
+            await server2.stop()
+
+    async def test_send_command_waits_for_reconnect(self, mock_server):
+        """send_command waits for reconnection instead of raising immediately."""
+        port = mock_server.port
+        client = AVEDominaClient(
+            host="127.0.0.1",
+            port=port,
+            reconnect_interval=0.3,
+            command_delay=0,
+        )
+        await client.connect()
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+
+        # Stop server — connection drops
+        await mock_server.stop()
+        await asyncio.sleep(0.3)
+        assert not client.connected
+
+        # Restart server — reconnect will happen
+        server2 = MockDominaServer(port=port)
+        await server2.start()
+        try:
+            # send_command should wait for reconnect, not raise immediately
+            await client.send_command("PING")
+            assert client.connected
+        finally:
+            await client.disconnect()
+            await server2.stop()
+
+    async def test_connection_error_breaks_listen_loop(self, mock_server):
+        """ConnectionError during message handling breaks the listen loop."""
+        from unittest.mock import AsyncMock, MagicMock
+        import aiohttp
+        from pyavedominaplus.protocol import encode_message
+
+        port = mock_server.port
+        client = AVEDominaClient(
+            host="127.0.0.1",
+            port=port,
+            auto_reconnect=False,
+            command_delay=0,
+        )
+        await client.connect()
+        await client.initialize()
+        await client.wait_for_initialization(timeout=5.0)
+
+        statuses = []
+        client.register_connection_callback(lambda s: statuses.append(s))
+
+        # Create a ping message that will trigger a ConnectionError during PONG
+        valid_msg = MagicMock()
+        valid_msg.type = aiohttp.WSMsgType.BINARY
+        valid_msg.data = encode_message("ping")
+
+        async def mock_ws_iter():
+            yield valid_msg
+
+        if client._listen_task:
+            client._listen_task.cancel()
+            try:
+                await client._listen_task
+            except asyncio.CancelledError:
+                pass
+
+        mock_ws = AsyncMock()
+        mock_ws.__aiter__ = lambda self: mock_ws_iter()
+        mock_ws.send_bytes = AsyncMock(
+            side_effect=ConnectionResetError("connection lost")
+        )
+        mock_ws.closed = False
+        original_ws = client._ws
+        client._ws = mock_ws
+        client._running = True
+
+        await client._listen_loop()
+
+        # Should have broken out and triggered ERROR
+        assert "ERROR" in statuses
+        client._ws = original_ws
+        await client.disconnect()

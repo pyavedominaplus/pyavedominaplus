@@ -20,6 +20,7 @@ from .const import (
     SHUTTER_STATUS_OPENING,
     SHUTTER_STATUS_CLOSED,
     SHUTTER_STATUS_CLOSING,
+    SHUTTER_STATUS_STOPPED,
     THERMOSTAT_MODE_AUTO,
     THERMOSTAT_MODE_ANTIFREEZE,
     THERMOSTAT_MODE_MANUAL,
@@ -126,6 +127,11 @@ class DominaDevice:
         return self.is_shutter and self.current_value == SHUTTER_STATUS_CLOSED
 
     @property
+    def is_stopped(self) -> bool:
+        """Return True if shutter is stopped mid-movement (status 5)."""
+        return self.is_shutter and self.current_value == SHUTTER_STATUS_STOPPED
+
+    @property
     def brightness(self) -> int:
         """Return the brightness level (0-31) for dimmers."""
         return self.current_value if self.is_dimmer else (31 if self.is_on else 0)
@@ -160,6 +166,9 @@ class DominaThermostat:
     humidity_threshold_l: int = 0
     humidity_threshold_m: int = 0
     humidity_threshold_h: int = 0
+    # Tracks the manual setpoint separately from set_point, which gets
+    # overwritten by auto-schedule TP updates when in auto mode.
+    manual_set_point: float = 0.0
 
     @property
     def is_heating(self) -> bool:
@@ -234,6 +243,8 @@ class DominaThermostat:
         self.temperature = int(r[5]) / 10.0
         self.mode = int(r[6])
         self.set_point = int(r[7]) / 10.0
+        if self.mode == THERMOSTAT_MODE_MANUAL:
+            self.manual_set_point = self.set_point
         if int(r[8]) == 1:
             self.mode = 0x1F  # Antifreeze mode
         self.local_off = int(r[9])

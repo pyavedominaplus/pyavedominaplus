@@ -1,5 +1,7 @@
 """Mock AVE DominaPlus WebSocket server for testing."""
 
+import asyncio
+
 from aiohttp import web, WSMsgType
 
 from pyavedominaplus.protocol import decode_message, encode_message
@@ -214,9 +216,15 @@ MOCK_THERMOSTAT_STATUS = ["1", "2", "6", "5", "1", "215", "1", "210", "0", "0"]
 class MockDominaServer:
     """A mock AVE DominaPlus server for testing."""
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 0) -> None:
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 0,
+        shutter_transition_time: float = 60.0,
+    ) -> None:
         self.host = host
         self.port = port
+        self.shutter_transition_time = shutter_transition_time
         self._app: web.Application | None = None
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
@@ -224,6 +232,7 @@ class MockDominaServer:
         self.device_statuses = dict(_device_statuses)
         self.thermostat_local_off: dict[str, int] = {"103": 0}
         self.received_commands: list[dict] = []
+        self._shutter_tasks: dict[str, asyncio.Task] = {}
 
     async def start(self) -> int:
         """Start the mock server and return the assigned port."""
@@ -241,6 +250,10 @@ class MockDominaServer:
 
     async def stop(self) -> None:
         """Stop the mock server."""
+        # Cancel pending shutter transition tasks
+        for task in self._shutter_tasks.values():
+            task.cancel()
+        self._shutter_tasks.clear()
         # Close all open websocket connections
         for ws in list(self._clients):
             await ws.close()
@@ -456,21 +469,55 @@ class MockDominaServer:
     async def _process_eai(
         self, ws: web.WebSocketResponse, parameters: list[str]
     ) -> None:
-        """Process a shutter EAI command."""
+        """Process a shutter EAI command.
+
+        Simulates real hardware behavior:
+        - Open/close starts the motor (OPENING=2 / CLOSING=4)
+        - Re-sending the same direction while moving stops (STOPPED=5)
+        - After shutter_transition_time, transitions to final state (OPEN=1 / CLOSED=3)
+        """
         if len(parameters) < 2:
             return
         device_id = parameters[0]
         sub_cmd = parameters[1]
-        if sub_cmd == "8":  # OPEN -> OPENING (2) -> OPEN (1)
-            new_value = 2  # OPENING
-        elif sub_cmd == "9":  # CLOSE -> CLOSING (4) -> CLOSED (3)
-            new_value = 4  # CLOSING
+        current = self.device_statuses.get(device_id, 0)
+        if sub_cmd == "8":
+            if current == 2:
+                # Open while opening -> stop
+                new_value = 5
+            else:
+                new_value = 2  # OPENING
+        elif sub_cmd == "9":
+            if current == 4:
+                # Close while closing -> stop
+                new_value = 5
+            else:
+                new_value = 4  # CLOSING
         else:
-            new_value = self.device_statuses.get(device_id, 0)
+            new_value = current
+        # Cancel any pending transition for this device
+        if device_id in self._shutter_tasks:
+            self._shutter_tasks[device_id].cancel()
+            del self._shutter_tasks[device_id]
         self.device_statuses[device_id] = new_value
         resp = encode_message("ack", ["EAI"])
         await ws.send_bytes(resp)
         await self._send_upd_ws(device_id, new_value)
+        # Schedule transition to final state if shutter is moving
+        if new_value in (2, 4):
+            final_value = 1 if new_value == 2 else 3  # OPEN or CLOSED
+            self._shutter_tasks[device_id] = asyncio.ensure_future(
+                self._shutter_transition(device_id, final_value)
+            )
+
+    async def _shutter_transition(self, device_id: str, final_value: int) -> None:
+        """After a delay, transition shutter from moving to final state."""
+        try:
+            await asyncio.sleep(self.shutter_transition_time)
+        except asyncio.CancelledError:
+            return
+        self.device_statuses[device_id] = final_value
+        await self._send_upd_ws(device_id, final_value)
 
     async def _process_es(
         self, ws: web.WebSocketResponse, parameters: list[str]

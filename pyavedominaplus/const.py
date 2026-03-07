@@ -110,6 +110,8 @@ UPD_DEVICE_ICON = "D"
 UPD_ALARM = "A"
 UPD_ANTITHEFT_AREA = "X"
 UPD_GROUP_DIMMER = "GRP"
+UPD_THERMOSTAT_FUNCTION = "TF"  # Thermostat function/scheduling info
+UPD_THERMOSTAT_REQUEST = "TR"  # Thermostat request
 UPD_ECONOMIZER = "epv"
 UPD_HOTEL = "htl"
 
@@ -118,6 +120,7 @@ SHUTTER_STATUS_OPEN = 1
 SHUTTER_STATUS_OPENING = 2
 SHUTTER_STATUS_CLOSED = 3
 SHUTTER_STATUS_CLOSING = 4
+SHUTTER_STATUS_STOPPED = 5  # Stopped mid-movement (partially open/closed)
 
 # Thermostat seasons
 SEASON_SUMMER = 0

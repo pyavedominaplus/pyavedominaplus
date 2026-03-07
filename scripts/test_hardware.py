@@ -45,7 +45,8 @@ def print_shutter_state(device) -> None:
     print(
         f"  State: value={device.current_value} "
         f"opening={device.is_opening} open={device.is_open} "
-        f"closing={device.is_closing} closed={device.is_closed}"
+        f"closing={device.is_closing} closed={device.is_closed} "
+        f"stopped={device.is_stopped}"
     )
 
 
@@ -301,6 +302,26 @@ async def test_shutter(client: AVEDominaClient, device):
 
     await asyncio.sleep(2)
 
+    # Stop while opening
+    print("\n  >> Opening shutter (to test stop)...")
+    await client.open_shutter(device.id)
+    await wait_for_update(client, device.id)
+    await asyncio.sleep(1)
+    print("  >> Stopping shutter...")
+    await client.stop_shutter(device.id)
+    await wait_for_update(client, device.id)
+    print_shutter_state(device)
+    result = confirm("Did the shutter stop?")
+    if result is None:
+        skipped += 1
+    elif result:
+        passed += 1
+    else:
+        failed += 1
+        print("  !! FAIL: Shutter did not stop")
+
+    await asyncio.sleep(2)
+
     # Close
     print("\n  >> Closing shutter...")
     await client.close_shutter(device.id)
@@ -340,7 +361,6 @@ async def test_thermostat(client: AVEDominaClient, device):
     failed = 0
     skipped = 0
 
-    original_set_point = thermo.set_point
     original_season = thermo.season
     original_local_off = thermo.local_off
 
@@ -376,10 +396,14 @@ async def test_thermostat(client: AVEDominaClient, device):
         print("  !! FAIL: Thermostat did not turn on")
 
     # Change set point
-    new_sp = original_set_point + 1.0
+    # Refresh thermostat state before capturing baseline
+    await client.send_command("WTS", [device.id], [[""]])
+    await wait_for_update(client, device.id)
+    set_point_before = thermo.set_point
+    new_sp = set_point_before + 1.0
     if new_sp > 35.0:
-        new_sp = original_set_point - 1.0
-    print(f"\n  >> Changing set point from {thermo.set_point}°C to {new_sp}°C...")
+        new_sp = set_point_before - 1.0
+    print(f"\n  >> Changing set point from {set_point_before}°C to {new_sp}°C...")
     await client.set_thermostat_set_point(device.id, new_sp)
     await wait_for_update(client, device.id)
     await client.send_command("WTS", [device.id], [[""]])
@@ -395,8 +419,8 @@ async def test_thermostat(client: AVEDominaClient, device):
         print("  !! FAIL: Set point did not change")
     print_thermo_state(thermo)
     # Restore set point
-    print(f"\n  >> Restoring set point to {original_set_point}°C...")
-    await client.set_thermostat_set_point(device.id, original_set_point)
+    print(f"\n  >> Restoring set point to {set_point_before}°C...")
+    await client.set_thermostat_set_point(device.id, set_point_before)
     await wait_for_update(client, device.id)
     await client.send_command("WTS", [device.id], [[""]])
     await wait_for_update(client, device.id)
