@@ -35,23 +35,29 @@ def print_device_state(device) -> None:
 
 def print_dimmer_state(device) -> None:
     """Print the current dimmer state."""
-    print(f"  State: value={device.current_value} is_on={device.is_on} brightness={device.brightness}")
+    print(
+        f"  State: value={device.current_value} is_on={device.is_on} brightness={device.brightness}"
+    )
 
 
 def print_shutter_state(device) -> None:
     """Print the current shutter state."""
-    print(f"  State: value={device.current_value} "
-          f"opening={device.is_opening} open={device.is_open} "
-          f"closing={device.is_closing} closed={device.is_closed}")
+    print(
+        f"  State: value={device.current_value} "
+        f"opening={device.is_opening} open={device.is_open} "
+        f"closing={device.is_closing} closed={device.is_closed}"
+    )
 
 
 def print_thermo_state(thermo) -> None:
     """Print the full thermostat state after a WTS re-read."""
-    print(f"  State: temp={thermo.temperature}°C sp={thermo.set_point}°C "
-          f"season={'winter' if thermo.is_heating else 'summer'} "
-          f"mode={'auto' if thermo.is_auto_mode else 'manual'} "
-          f"local_off={thermo.local_off} fan={thermo.fan_level}"
-          f"{f' humidity={thermo.humidity_value}%' if thermo.humidity_enabled else ''}")
+    print(
+        f"  State: temp={thermo.temperature}°C sp={thermo.set_point}°C "
+        f"season={'winter' if thermo.is_heating else 'summer'} "
+        f"mode={'auto' if thermo.is_auto_mode else 'manual'} "
+        f"local_off={thermo.local_off} fan={thermo.fan_level}"
+        f"{f' humidity={thermo.humidity_value}%' if thermo.humidity_enabled else ''}"
+    )
 
 
 def ask(prompt: str) -> str:
