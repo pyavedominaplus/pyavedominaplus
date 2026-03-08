@@ -50,4 +50,4 @@ __all__ = [
     "THERMOSTAT_MODE_MANUAL",
 ]
 
-__version__ = "0.1.7"
+__version__ = "0.1.8"
