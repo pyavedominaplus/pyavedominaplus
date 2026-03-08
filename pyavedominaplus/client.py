@@ -92,8 +92,8 @@ class AVEDominaClient:
         self._owns_session = session is None
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._running = False
-        self._listen_task: asyncio.Task | None = None
-        self._reconnect_task: asyncio.Task | None = None
+        self._listen_task: asyncio.Task[None] | None = None
+        self._reconnect_task: asyncio.Task[None] | None = None
         self._auto_reconnect = auto_reconnect
         self._reconnect_interval = reconnect_interval
         self._max_reconnect_interval = max_reconnect_interval
@@ -136,7 +136,7 @@ class AVEDominaClient:
         """
         self._update_callbacks.append(callback)
 
-        def _unregister():
+        def _unregister() -> None:
             self._update_callbacks.remove(callback)
 
         return _unregister
@@ -147,7 +147,7 @@ class AVEDominaClient:
         """Register a callback for connection status changes."""
         self._connection_status_callbacks.append(callback)
 
-        def _unregister():
+        def _unregister() -> None:
             self._connection_status_callbacks.remove(callback)
 
         return _unregister
@@ -238,6 +238,9 @@ class AVEDominaClient:
                         await self._session.close()
                     self._session = aiohttp.ClientSession()
                 self._reset_init_state()
+                if self._session is None:
+                    self._session = aiohttp.ClientSession()
+                    self._owns_session = True
                 self._ws = await self._session.ws_connect(
                     self.url,
                     protocols=["binary", "base64"],
@@ -283,6 +286,8 @@ class AVEDominaClient:
                         break
             if not self.connected:
                 raise ConnectionError("Not connected to DominaPlus server")
+        if self._ws is None:
+            raise ConnectionError("Not connected to DominaPlus server")
         msg = encode_message(command, parameters, records)
         _LOGGER.debug(
             "Sending command: %s, params=%s, data=%s",
@@ -476,6 +481,8 @@ class AVEDominaClient:
 
     async def _listen_loop(self) -> None:
         """Main loop for receiving messages from the server."""
+        if self._ws is None:
+            return
         try:
             async for ws_msg in self._ws:
                 if not self._running:
@@ -516,7 +523,7 @@ class AVEDominaClient:
                 if self._auto_reconnect:
                     self._reconnect_task = asyncio.ensure_future(self._reconnect_loop())
 
-    async def _handle_message(self, msg: dict) -> None:
+    async def _handle_message(self, msg: dict[str, Any]) -> None:
         """Handle a decoded protocol message."""
         command = msg["command"]
         parameters = msg["parameters"]
@@ -796,69 +803,69 @@ class AVEDominaClient:
             # TLO: thermostat local off from map command
             # Format: TLO, map_command_id, value (INVERTED: 0->1, 1->0)
             if len(parameters) >= 3:
-                device_id = self._resolve_device_id(parameters[1])
-                if device_id:
+                resolved_id = self._resolve_device_id(parameters[1])
+                if resolved_id:
                     # Value is inverted compared to WT/Z
                     raw = int(parameters[2])
                     local_off = 0 if raw else 1
-                    thermo = self._thermostats.get(device_id)
+                    thermo = self._thermostats.get(resolved_id)
                     if thermo:
                         thermo.local_off = local_off
                     self._notify_update(
                         "thermostat_local_off",
-                        {"device_id": device_id, "local_off": str(local_off)},
+                        {"device_id": resolved_id, "local_off": str(local_off)},
                     )
 
         elif upd_type == UPD_THERMOSTAT_SEASON_MAP:
             # TS: thermostat season from map command
             if len(parameters) >= 3:
-                device_id = self._resolve_device_id(parameters[1])
-                if device_id:
-                    thermo = self._thermostats.get(device_id)
+                resolved_id = self._resolve_device_id(parameters[1])
+                if resolved_id:
+                    thermo = self._thermostats.get(resolved_id)
                     if thermo:
                         thermo.season = int(parameters[2])
                     self._notify_update(
                         "thermostat_season",
-                        {"device_id": device_id, "season": parameters[2]},
+                        {"device_id": resolved_id, "season": parameters[2]},
                     )
 
         elif upd_type == UPD_THERMOSTAT_TEMP_MAP:
             # TT: thermostat temperature from map command
             if len(parameters) >= 3:
-                device_id = self._resolve_device_id(parameters[1])
-                if device_id:
-                    thermo = self._thermostats.get(device_id)
+                resolved_id = self._resolve_device_id(parameters[1])
+                if resolved_id:
+                    thermo = self._thermostats.get(resolved_id)
                     if thermo:
                         thermo.update_temperature(parameters[2])
                     self._notify_update(
                         "thermostat_temperature",
-                        {"device_id": device_id, "temperature": parameters[2]},
+                        {"device_id": resolved_id, "temperature": parameters[2]},
                     )
 
         elif upd_type == UPD_THERMOSTAT_OFFSET_MAP:
             # TO: thermostat offset from map command
             if len(parameters) >= 3:
-                device_id = self._resolve_device_id(parameters[1])
-                if device_id:
-                    thermo = self._thermostats.get(device_id)
+                resolved_id = self._resolve_device_id(parameters[1])
+                if resolved_id:
+                    thermo = self._thermostats.get(resolved_id)
                     if thermo:
                         thermo.update_offset(parameters[2])
                     self._notify_update(
                         "thermostat_offset",
-                        {"device_id": device_id, "offset": parameters[2]},
+                        {"device_id": resolved_id, "offset": parameters[2]},
                     )
 
         elif upd_type == UPD_THERMOSTAT_FANLEVEL_MAP:
             # TL: thermostat fan level from map command
             if len(parameters) >= 3:
-                device_id = self._resolve_device_id(parameters[1])
-                if device_id:
-                    thermo = self._thermostats.get(device_id)
+                resolved_id = self._resolve_device_id(parameters[1])
+                if resolved_id:
+                    thermo = self._thermostats.get(resolved_id)
                     if thermo:
                         thermo.fan_level = int(parameters[2])
                     self._notify_update(
                         "thermostat_fan_level",
-                        {"device_id": device_id, "fan_level": parameters[2]},
+                        {"device_id": resolved_id, "fan_level": parameters[2]},
                     )
 
         elif upd_type == UPD_THERMOSTAT_FUNCTION:

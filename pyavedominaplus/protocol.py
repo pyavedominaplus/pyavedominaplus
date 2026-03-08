@@ -1,5 +1,7 @@
 """AVE DominaPlus WebSocket protocol encoding/decoding."""
 
+from typing import Any
+
 from .const import STX, ETX, EOT, GS, RS
 
 
@@ -42,7 +44,7 @@ def encode_message(
     return msg.encode("utf-8")
 
 
-def decode_message(raw: bytes) -> list[dict]:
+def decode_message(raw: bytes) -> list[dict[str, Any]]:
     """Decode one or more DominaPlus messages from raw bytes.
 
     Returns a list of dicts, each with keys:

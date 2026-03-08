@@ -35,6 +35,10 @@ jobs:
         run: |
           black --check pyavedominaplus tests scripts
 
+      - name: Type check with mypy
+        run: |
+          mypy pyavedominaplus/ --strict
+
       - name: Run tests
         run: |
           pytest tests/ --cov=pyavedominaplus --cov-report=term
