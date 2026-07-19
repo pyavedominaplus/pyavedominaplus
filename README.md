@@ -9,6 +9,7 @@ AI Disclaimer: This project was built using the assistance of Claude Code
 - Async WebSocket client with automatic ping/pong keepalive
 - Full binary protocol implementation (STX/ETX framing, CRC validation)
 - Push-based real-time device status updates
+- Time-based shutter position estimation (`ShutterTravelEstimator`) from configurable open/close travel times
 - Home Assistant integration with config flow UI
 
 ### Supported devices
@@ -17,7 +18,7 @@ AI Disclaimer: This project was built using the assistance of Claude Code
 |---|---|---|
 | Light (type 1, 22) | `light` | On/off, toggle |
 | Dimmer (type 2) | `light` | On/off, toggle, brightness (0-31) |
-| Shutter (type 3, 16, 19) | `cover` | Open, close, stop |
+| Shutter (type 3, 16, 19) | `cover` | Open, close, stop, position (time-based estimate) |
 | Thermostat (type 4) | `climate` | Temperature setpoint, season mode, on/off, keyboard lock |
 | Scenario (type 6) | `switch` | Activate |
 | Energy meter (type 9) | — | Read-only |
@@ -25,7 +26,7 @@ AI Disclaimer: This project was built using the assistance of Claude Code
 ## Requirements
 
 - Python >= 3.13
-- aiohttp >= 3.9
+- aiohttp >= 3.11
 
 ## Installation
 
@@ -98,13 +99,15 @@ pyavedominaplus/           Python SDK
   client.py                Async WebSocket client
   protocol.py              Message encoding/decoding, CRC
   models.py                DominaDevice, DominaThermostat, DominaArea
+  travel.py                Time-based shutter position estimation
   const.py                 Protocol constants and device types
 
-tests/                     SDK unit tests (227 tests)
+tests/                     SDK unit tests (269 tests)
 
 scripts/                   Utility scripts for hardware testing
   test_hardware.py         Interactive hardware test runner
   monitor_device.py        Live device state monitor
+  measure_covers.py        Measure shutter travel times for position estimation
 
 extract_pcap.py            PCAP extractor with WebSocket frame parsing
 
@@ -181,7 +184,7 @@ The client follows the same initialization sequence as the original AVE webapp:
 3. For each thermostat, request `WTS` (full thermostat status)
 4. After all `LMC` responses arrive, subscribe to updates (`SU2`, `SU3`) and request device statuses via `WSF` for each device family
 5. WSF commands are **staggered with ~300ms delays** between each — sending them all at once overwhelms the hardware and causes dropped responses
-6. Initialization is complete once all devices have received their status via `UPD WS` or `WTS` responses
+6. Initialization is complete once all devices have received their status via `wsf` records (or legacy `UPD WS` messages) and `WTS` responses
 
 ### Shutter status values
 

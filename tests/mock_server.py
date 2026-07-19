@@ -221,15 +221,24 @@ class MockDominaServer:
         host: str = "127.0.0.1",
         port: int = 0,
         shutter_transition_time: float = 60.0,
+        wsf_legacy_upd: bool = False,
+        sts_echo: bool = True,
     ) -> None:
         self.host = host
         self.port = port
         self.shutter_transition_time = shutter_transition_time
+        # Real hardware answers WSF with a wsf record message; set
+        # wsf_legacy_upd to emulate servers that answer with UPD WS instead.
+        self.wsf_legacy_upd = wsf_legacy_upd
+        # Real hardware does not reliably echo TP/TM/WT S after STS;
+        # set sts_echo=False to emulate that.
+        self.sts_echo = sts_echo
         self._app: web.Application | None = None
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
         self._clients: set[web.WebSocketResponse] = set()
         self.device_statuses = dict(_device_statuses)
+        self.thermostat_status: list[str] = list(MOCK_THERMOSTAT_STATUS)
         self.thermostat_local_off: dict[str, int] = {"103": 0}
         self.received_commands: list[dict] = []
         self._shutter_tasks: dict[str, asyncio.Task] = {}
@@ -393,29 +402,43 @@ class MockDominaServer:
         """Send thermostat status."""
         device_id = parameters[0] if parameters else "103"
         resp = encode_message(
-            "wts", parameters=[device_id], records=[MOCK_THERMOSTAT_STATUS]
+            "wts", parameters=[device_id], records=[self.thermostat_status]
         )
         await ws.send_bytes(resp)
 
     async def _respond_wsf(
         self, ws: web.WebSocketResponse, parameters: list[str]
     ) -> None:
-        """Send device statuses for a given family."""
+        """Send device statuses for a given family.
+
+        Real hardware answers with a wsf message whose records are
+        [device_id, status] pairs; the legacy mode sends individual
+        UPD WS messages instead.
+        """
         family = parameters[0] if parameters else "1"
         family_int = int(family)
-        # Send UPD WS for each device of this family
-        for device in MOCK_DEVICES:
-            device_type = int(device[2])
-            if device_type == family_int:
-                device_id = device[0]
-                status = self.device_statuses.get(device_id, 0)
-                upd = encode_message(
-                    "upd",
-                    parameters=["WS", str(device_type), device_id, str(status)],
-                )
-                await ws.send_bytes(upd)
-        # Send ACK when done
-        resp = encode_message("ack")
+        if self.wsf_legacy_upd:
+            # Send UPD WS for each device of this family
+            for device in MOCK_DEVICES:
+                device_type = int(device[2])
+                if device_type == family_int:
+                    device_id = device[0]
+                    status = self.device_statuses.get(device_id, 0)
+                    upd = encode_message(
+                        "upd",
+                        parameters=["WS", str(device_type), device_id, str(status)],
+                    )
+                    await ws.send_bytes(upd)
+            # Send ACK when done
+            resp = encode_message("ack")
+            await ws.send_bytes(resp)
+            return
+        records = [
+            [device[0], str(self.device_statuses.get(device[0], 0))]
+            for device in MOCK_DEVICES
+            if int(device[2]) == family_int
+        ]
+        resp = encode_message("wsf", parameters=[family], records=records)
         await ws.send_bytes(resp)
 
     def _find_device_type(self, device_id: str) -> int:
@@ -561,6 +584,14 @@ class MockDominaServer:
             season = records[0][0]
             mode = records[0][1]
             set_point = records[0][2]
+            # Keep the thermostat status in sync so WTS re-reads reflect
+            # the change even when echoes are disabled.
+            self.thermostat_status = list(MOCK_THERMOSTAT_STATUS)
+            self.thermostat_status[4] = season
+            self.thermostat_status[6] = mode
+            self.thermostat_status[7] = set_point
+            if not self.sts_echo:
+                return
             # Send UPD for set point change
             upd_tp = encode_message("upd", parameters=["TP", device_id, set_point])
             # Send UPD for mode change

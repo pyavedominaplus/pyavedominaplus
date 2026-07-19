@@ -150,7 +150,7 @@ class TestClientDeviceControl:
         assert mock_server.device_statuses["101"] == 31
 
     async def test_dimmer_level_clamped(self, client, mock_server):
-        """Test that dimmer level is clamped to 0-254."""
+        """Test that dimmer level is clamped to the AVE 0-31 range."""
         await client.initialize()
         await client.wait_for_initialization(timeout=5.0)
 
@@ -1465,7 +1465,7 @@ class TestClientListenLoopEdgeCases:
         await client.wait_for_initialization(timeout=5.0)
 
         with patch(
-            "pyavedominaplus.client.decode_message",
+            "pyavedominaplus.protocol.ProtocolDecoder.feed",
             side_effect=ValueError("bad data"),
         ):
             await mock_server.send_update("upd", ["WS", "1", "100", "1"])
@@ -2097,3 +2097,171 @@ class TestAutoReconnect:
         assert "ERROR" in statuses
         client._ws = original_ws
         await client.disconnect()
+
+
+class TestClientWSF:
+    """Tests for WSF record-response handling."""
+
+    async def test_wsf_records_populate_statuses(self, client, mock_server):
+        """Default mock mode answers WSF with wsf records; statuses load."""
+        mock_server.device_statuses["100"] = 1
+        mock_server.device_statuses["102"] = 3
+        await client.initialize()
+        assert await client.wait_for_initialization(timeout=5.0)
+        assert client.devices["100"].current_value == 1
+        assert client.devices["102"].current_value == 3
+
+    async def test_wsf_records_fire_device_status_events(self, client, mock_server):
+        """Each wsf record fires a device_status update callback."""
+        events = []
+        client.register_update_callback(lambda t, d: events.append((t, d)))
+        await client.initialize()
+        assert await client.wait_for_initialization(timeout=5.0)
+        status_events = [e for e in events if e[0] == "device_status"]
+        assert {e[1]["device_id"] for e in status_events} >= {"100", "101", "102"}
+
+    async def test_wsf_short_or_bad_records_skipped(self, client, mock_server):
+        """Records with missing fields or non-numeric status are skipped."""
+        await client.initialize()
+        assert await client.wait_for_initialization(timeout=5.0)
+        before = client.devices["100"].current_value
+        await client._handle_wsf(["1"], [["100"], ["100", "abc"], []])
+        assert client.devices["100"].current_value == before
+
+    async def test_wsf_legacy_upd_mode_still_initializes(self):
+        """Servers answering WSF with UPD WS messages still work."""
+        server = MockDominaServer(wsf_legacy_upd=True)
+        await server.start()
+        try:
+            c = AVEDominaClient(host="127.0.0.1", port=server.port, command_delay=0)
+            await c.connect()
+            await c.initialize()
+            assert await c.wait_for_initialization(timeout=5.0)
+            await c.disconnect()
+        finally:
+            await server.stop()
+
+
+class TestClientLMCDuplicates:
+    """Duplicate/unmatched lmc responses must not re-trigger status requests."""
+
+    async def test_duplicate_lmc_does_not_rerequest_statuses(self, client, mock_server):
+        await client.initialize()
+        assert await client.wait_for_initialization(timeout=5.0)
+        wsf_count = sum(
+            1 for cmd in mock_server.received_commands if cmd["command"] == "WSF"
+        )
+        # Replay a duplicate and an unmatched lmc response
+        await client._handle_lmc(["1"], [])
+        await client._handle_lmc(["does-not-exist"], [])
+        await asyncio.sleep(0.2)
+        wsf_count_after = sum(
+            1 for cmd in mock_server.received_commands if cmd["command"] == "WSF"
+        )
+        assert wsf_count_after == wsf_count
+
+    async def test_statuses_requested_only_once(self, client, mock_server):
+        await client.initialize()
+        assert await client.wait_for_initialization(timeout=5.0)
+        # 8 families requested exactly once each
+        wsf_families = [
+            cmd["parameters"][0]
+            for cmd in mock_server.received_commands
+            if cmd["command"] == "WSF"
+        ]
+        assert len(wsf_families) == len(set(wsf_families)) == 8
+
+
+class TestClientConnectTimeout:
+    """Tests for connect() timeout and error mapping."""
+
+    async def test_connect_refused_raises_connection_error(self):
+        from pyavedominaplus.exceptions import AVEDominaConnectionError
+
+        client = AVEDominaClient(host="127.0.0.1", port=1, connect_timeout=5.0)
+        with pytest.raises(AVEDominaConnectionError):
+            await client.connect()
+
+    async def test_connect_timeout_raises_timeout_error(self):
+        from pyavedominaplus.exceptions import AVEDominaTimeoutError
+
+        # RFC 5737 TEST-NET address: guaranteed unroutable, connect hangs
+        client = AVEDominaClient(host="192.0.2.1", port=14001, connect_timeout=0.1)
+        with pytest.raises(AVEDominaTimeoutError):
+            await client.connect()
+
+    async def test_connect_errors_subclass_connectionerror(self):
+        client = AVEDominaClient(host="127.0.0.1", port=1, connect_timeout=5.0)
+        with pytest.raises(ConnectionError):
+            await client.connect()
+
+    async def test_connect_twice_is_noop(self, mock_server):
+        client = AVEDominaClient(
+            host="127.0.0.1", port=mock_server.port, command_delay=0
+        )
+        await client.connect()
+        first_ws = client._ws
+        await client.connect()
+        assert client._ws is first_ws
+        await client.disconnect()
+
+
+class TestClientSTSNoEcho:
+    """Thermostat sets must converge even when the server does not echo."""
+
+    async def test_set_point_without_echo(self):
+        server = MockDominaServer(sts_echo=False)
+        await server.start()
+        try:
+            c = AVEDominaClient(host="127.0.0.1", port=server.port, command_delay=0)
+            await c.connect()
+            await c.initialize()
+            assert await c.wait_for_initialization(timeout=5.0)
+            await c.set_thermostat_set_point("103", 24.5)
+            await asyncio.sleep(0.3)
+            # Optimistic update + WTS re-read both give the new value
+            assert c.thermostats["103"].set_point == 24.5
+            await c.disconnect()
+        finally:
+            await server.stop()
+
+    async def test_set_season_without_echo(self):
+        server = MockDominaServer(sts_echo=False)
+        await server.start()
+        try:
+            c = AVEDominaClient(host="127.0.0.1", port=server.port, command_delay=0)
+            await c.connect()
+            await c.initialize()
+            assert await c.wait_for_initialization(timeout=5.0)
+            await c.set_thermostat_season("103", 0)
+            await asyncio.sleep(0.3)
+            assert c.thermostats["103"].season == 0
+            await c.disconnect()
+        finally:
+            await server.stop()
+
+    async def test_set_mode_without_echo(self):
+        server = MockDominaServer(sts_echo=False)
+        await server.start()
+        try:
+            c = AVEDominaClient(host="127.0.0.1", port=server.port, command_delay=0)
+            await c.connect()
+            await c.initialize()
+            assert await c.wait_for_initialization(timeout=5.0)
+            await c.set_thermostat_mode("103", 0)
+            await asyncio.sleep(0.3)
+            assert c.thermostats["103"].mode == 0
+            await c.disconnect()
+        finally:
+            await server.stop()
+
+
+class TestClientContextManager:
+    """Tests for async context manager support."""
+
+    async def test_async_with_connects_and_disconnects(self, mock_server):
+        async with AVEDominaClient(
+            host="127.0.0.1", port=mock_server.port, command_delay=0
+        ) as c:
+            assert c.connected
+        assert not c.connected

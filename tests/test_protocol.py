@@ -324,3 +324,94 @@ class TestProtocolEdgeCases:
         messages = decode_message(raw)
         assert len(messages) == 1
         assert messages[0]["command"] == "ack"
+
+
+class TestProtocolDecoder:
+    """Tests for the stateful, reassembling ProtocolDecoder."""
+
+    def test_complete_message(self):
+        from pyavedominaplus.protocol import ProtocolDecoder
+
+        dec = ProtocolDecoder()
+        msgs = dec.feed(encode_message("lm", records=[["1", "Area", "0"]]))
+        assert len(msgs) == 1
+        assert msgs[0]["command"] == "lm"
+        assert msgs[0]["records"] == [["1", "Area", "0"]]
+
+    def test_message_split_across_frames(self):
+        from pyavedominaplus.protocol import ProtocolDecoder
+
+        dec = ProtocolDecoder()
+        raw = encode_message("upd", ["WS", "1", "100", "1"])
+        assert dec.feed(raw[:5]) == []
+        msgs = dec.feed(raw[5:])
+        assert len(msgs) == 1
+        assert msgs[0]["command"] == "upd"
+        assert msgs[0]["parameters"] == ["WS", "1", "100", "1"]
+
+    def test_two_messages_one_partial(self):
+        from pyavedominaplus.protocol import ProtocolDecoder
+
+        dec = ProtocolDecoder()
+        first = encode_message("ack")
+        second = encode_message("upd", ["WS", "1", "100", "1"])
+        msgs = dec.feed(first + second[:4])
+        assert [m["command"] for m in msgs] == ["ack"]
+        msgs = dec.feed(second[4:])
+        assert [m["command"] for m in msgs] == ["upd"]
+
+    def test_reset_discards_partial(self):
+        from pyavedominaplus.protocol import ProtocolDecoder
+
+        dec = ProtocolDecoder()
+        raw = encode_message("upd", ["WS", "1", "100", "1"])
+        dec.feed(raw[:5])
+        dec.reset()
+        # A new complete message decodes cleanly after reset
+        msgs = dec.feed(encode_message("ack"))
+        assert [m["command"] for m in msgs] == ["ack"]
+
+    def test_garbage_before_stx_skipped(self):
+        from pyavedominaplus.protocol import ProtocolDecoder
+
+        dec = ProtocolDecoder()
+        msgs = dec.feed(b"\x00\x01garbage" + encode_message("ack"))
+        assert [m["command"] for m in msgs] == ["ack"]
+
+    def test_bad_crc_dropped(self):
+        from pyavedominaplus.protocol import ProtocolDecoder
+
+        dec = ProtocolDecoder()
+        raw = bytearray(encode_message("ack"))
+        # Corrupt the CRC (the 2 chars before the trailing EOT)
+        raw[-2] = ord("0") if raw[-2] != ord("0") else ord("1")
+        assert dec.feed(bytes(raw)) == []
+
+    def test_bad_crc_ignored_when_validation_off(self):
+        from pyavedominaplus.protocol import ProtocolDecoder
+
+        dec = ProtocolDecoder(validate_crc=False)
+        raw = bytearray(encode_message("ack"))
+        raw[-2] = ord("0") if raw[-2] != ord("0") else ord("1")
+        msgs = dec.feed(bytes(raw))
+        assert [m["command"] for m in msgs] == ["ack"]
+
+
+class TestDecodeMessageCRC:
+    """CRC validation in the stateless decode_message."""
+
+    def test_valid_crc_accepted(self):
+        raw = encode_message("lm", records=[["1", "Area", "0"]])
+        msgs = decode_message(raw, validate_crc=True)
+        assert len(msgs) == 1
+
+    def test_bad_crc_dropped(self):
+        raw = bytearray(encode_message("ack"))
+        raw[-2] = ord("0") if raw[-2] != ord("0") else ord("1")
+        assert decode_message(bytes(raw), validate_crc=True) == []
+
+    def test_default_keeps_backwards_compatible_lenience(self):
+        raw = bytearray(encode_message("ack"))
+        raw[-2] = ord("0") if raw[-2] != ord("0") else ord("1")
+        msgs = decode_message(bytes(raw))
+        assert [m["command"] for m in msgs] == ["ack"]

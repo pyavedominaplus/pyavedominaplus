@@ -132,7 +132,30 @@ THERMOSTAT_MODE_AUTO = 0  # Automatic (follows built-in schedule)
 THERMOSTAT_MODE_MANUAL = 1  # Manual (user-set temperature)
 THERMOSTAT_MODE_ANTIFREEZE = 0x1F  # Antifreeze protection (set by system)
 
+# Map command types
+MAP_COMMAND_TYPE_SCENARIO = 17  # Map command that triggers a scenario
+
 # Connection statuses
 CONN_STATUS_OPEN = "OPEN"
 CONN_STATUS_CLOSE = "CLOSE"
 CONN_STATUS_ERROR = "ERROR"
+
+# Update-callback event types (first argument of UpdateCallback)
+EVENT_LM_LOADED = "lm_loaded"
+EVENT_LDI_LOADED = "ldi_loaded"
+EVENT_LMC_LOADED = "lmc_loaded"
+EVENT_DEVICE_STATUS = "device_status"
+EVENT_THERMOSTAT_FULL_STATUS = "thermostat_full_status"
+EVENT_THERMOSTAT_TEMPERATURE = "thermostat_temperature"
+EVENT_THERMOSTAT_SETPOINT = "thermostat_setpoint"
+EVENT_THERMOSTAT_MODE = "thermostat_mode"
+EVENT_THERMOSTAT_SEASON = "thermostat_season"
+EVENT_THERMOSTAT_OFFSET = "thermostat_offset"
+EVENT_THERMOSTAT_FAN_LEVEL = "thermostat_fan_level"
+EVENT_THERMOSTAT_LOCAL_OFF = "thermostat_local_off"
+EVENT_THERMOSTAT_KEYBOARD_LOCK = "thermostat_keyboard_lock"
+EVENT_THERMOSTAT_WINDOW = "thermostat_window"
+EVENT_THERMOSTAT_FUNCTION = "thermostat_function"
+EVENT_THERMOSTAT_REQUEST = "thermostat_request"
+EVENT_HUMIDITY = "humidity"
+EVENT_RGB = "rgb"

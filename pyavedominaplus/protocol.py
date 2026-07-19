@@ -1,8 +1,11 @@
 """AVE DominaPlus WebSocket protocol encoding/decoding."""
 
+import logging
 from typing import Any
 
 from .const import STX, ETX, EOT, GS, RS
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def build_crc(data: str) -> str:
@@ -44,13 +47,62 @@ def encode_message(
     return msg.encode("utf-8")
 
 
-def decode_message(raw: bytes) -> list[dict[str, Any]]:
+def _decode_part(part: str, validate_crc: bool) -> dict[str, Any] | None:
+    """Decode a single STX..ETX+CRC message (EOT already stripped)."""
+    if not part or len(part) < 3:
+        return None
+
+    # Format: STX + payload + ETX + CRC(2 chars)
+    etx_pos = part.find(chr(ETX))
+    if validate_crc and ord(part[0]) == STX and etx_pos >= 0:
+        # CRC is computed over STX + payload + ETX; the 2 chars after
+        # ETX carry it. Frames without a trailing CRC are tolerated.
+        received_crc = part[etx_pos + 1 : etx_pos + 3]
+        if len(received_crc) == 2:
+            expected_crc = build_crc(part[: etx_pos + 1])
+            if received_crc.upper() != expected_crc:
+                _LOGGER.warning(
+                    "Dropping frame with bad CRC (got %s, expected %s): %r",
+                    received_crc,
+                    expected_crc,
+                    part,
+                )
+                return None
+
+    if ord(part[0]) == STX:
+        part = part[1:]
+        etx_pos = part.find(chr(ETX))
+    if etx_pos >= 0:
+        part = part[:etx_pos]
+
+    # Split records (RS separator)
+    pieces = part.split(chr(RS))
+
+    # First piece contains command + parameters (GS separated)
+    fields = pieces[0].split(chr(GS))
+    command = fields[0] if fields else ""
+    parameters = fields[1:] if len(fields) > 1 else []
+
+    # Remaining pieces are records
+    records = [pieces[i].split(chr(GS)) for i in range(1, len(pieces))]
+
+    return {
+        "command": command,
+        "parameters": parameters,
+        "records": records,
+    }
+
+
+def decode_message(raw: bytes, validate_crc: bool = False) -> list[dict[str, Any]]:
     """Decode one or more DominaPlus messages from raw bytes.
 
     Returns a list of dicts, each with keys:
         command: str
         parameters: list[str]
         records: list[list[str]]
+
+    Assumes ``raw`` contains only complete messages. For a stream that may
+    split messages across frames, use ``ProtocolDecoder`` instead.
     """
     try:
         text = raw.decode("utf-8")
@@ -59,45 +111,55 @@ def decode_message(raw: bytes) -> list[dict[str, Any]]:
 
     messages = []
     # Split on EOT to handle multiple messages in one frame
-    parts = text.split(chr(EOT))
-
-    for part in parts:
-        if not part or len(part) < 3:
-            continue
-
-        # Strip STX at start, then ETX + CRC at end
-        # Format: STX + payload + ETX + CRC(2 chars)
-        if ord(part[0]) == STX:
-            part = part[1:]
-
-        # Find ETX position - CRC is the last 2 chars after ETX
-        etx_pos = part.find(chr(ETX))
-        if etx_pos >= 0:
-            part = part[:etx_pos]
-
-        # Split records (RS separator)
-        pieces = part.split(chr(RS))
-
-        # First piece contains command + parameters (GS separated)
-        fields = pieces[0].split(chr(GS))
-        command = fields[0] if fields else ""
-        parameters = fields[1:] if len(fields) > 1 else []
-
-        # Remaining pieces are records
-        records = []
-        for i in range(1, len(pieces)):
-            record_fields = pieces[i].split(chr(GS))
-            records.append(record_fields)
-
-        messages.append(
-            {
-                "command": command,
-                "parameters": parameters,
-                "records": records,
-            }
-        )
+    for part in text.split(chr(EOT)):
+        msg = _decode_part(part, validate_crc)
+        if msg is not None:
+            messages.append(msg)
 
     return messages
+
+
+class ProtocolDecoder:
+    """Stateful decoder that reassembles messages split across frames.
+
+    A single STX..EOT message may arrive split over multiple WebSocket
+    frames (observed in real captures); any partial trailing message is
+    buffered until the terminating EOT arrives.
+    """
+
+    def __init__(self, validate_crc: bool = True) -> None:
+        self._buffer = b""
+        self._validate_crc = validate_crc
+
+    def reset(self) -> None:
+        """Discard any buffered partial message (e.g. on reconnect)."""
+        self._buffer = b""
+
+    def feed(self, raw: bytes) -> list[dict[str, Any]]:
+        """Feed raw bytes and return all complete messages decoded so far."""
+        buf = self._buffer + raw
+        messages: list[dict[str, Any]] = []
+        while buf:
+            stx_pos = buf.find(bytes([STX]))
+            if stx_pos < 0:
+                buf = b""
+                break
+            if stx_pos > 0:
+                buf = buf[stx_pos:]
+            eot_pos = buf.find(bytes([EOT]))
+            if eot_pos < 0:
+                break
+            frame = buf[:eot_pos]
+            buf = buf[eot_pos + 1 :]
+            try:
+                text = frame.decode("utf-8")
+            except UnicodeDecodeError:
+                text = "".join(chr(b) for b in frame)
+            msg = _decode_part(text, self._validate_crc)
+            if msg is not None:
+                messages.append(msg)
+        self._buffer = buf
+        return messages
 
 
 def encode_light_command(device_id: str, sub_command: str) -> bytes:
