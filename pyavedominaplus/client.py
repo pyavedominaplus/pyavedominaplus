@@ -87,6 +87,12 @@ from .models import (
     DominaThermostat,
 )
 from .protocol import ProtocolDecoder, encode_message
+from .webinfo import (
+    DEFAULT_HTTP_PORT,
+    DEFAULT_HTTP_TIMEOUT,
+    WebserverInfo,
+    fetch_webserver_info,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -108,6 +114,8 @@ class AVEDominaClient:
         command_delay: float = 0.3,
         connect_timeout: float = 10.0,
         status_settle_timeout: float = 10.0,
+        http_port: int = DEFAULT_HTTP_PORT,
+        http_timeout: float = DEFAULT_HTTP_TIMEOUT,
     ) -> None:
         self.host = host
         self.port = port
@@ -123,6 +131,9 @@ class AVEDominaClient:
         self._command_delay = command_delay
         self._connect_timeout = connect_timeout
         self._status_settle_timeout = status_settle_timeout
+        self._http_port = http_port
+        self._http_timeout = http_timeout
+        self._webserver_info = WebserverInfo()
         self._devices: dict[str, DominaDevice] = {}
         self._thermostats: dict[str, DominaThermostat] = {}
         self._areas: dict[str, DominaArea] = {}
@@ -157,6 +168,53 @@ class AVEDominaClient:
     @property
     def areas(self) -> dict[str, DominaArea]:
         return self._areas
+
+    @property
+    def mac_address(self) -> str | None:
+        """Return the webserver's MAC address, lowercased, if known.
+
+        Read over HTTP during connect(). This is the only stable identifier
+        the device offers: anything keyed on the IP address changes when the
+        DHCP lease does. None when the HTTP endpoint was unreachable.
+
+        Reported exactly as the device gives it apart from case, so it may
+        be colon-separated or bare hex depending on firmware.
+        """
+        return self._webserver_info.mac_address
+
+    @property
+    def device_type(self) -> str | None:
+        """Return the webserver's hardware type (e.g. "WBS"), if known."""
+        return self._webserver_info.device_type
+
+    @property
+    def device_version(self) -> str | None:
+        """Return the webserver's detailed build string, if known."""
+        return self._webserver_info.device_version
+
+    @property
+    def plant_code(self) -> str | None:
+        """Return the installation's plant code, if known.
+
+        An installation identifier: treat it as sensitive and redact it from
+        anything published, such as diagnostics attached to a bug report.
+        """
+        return self._webserver_info.plant_code
+
+    @property
+    def system_info(self) -> dict[str, str]:
+        """Return the webserver's system information, or {} if unavailable.
+
+        Read over HTTP during connect(). Every element the device reports is
+        included, so keys vary with firmware; the ones seen in the wild are
+        dhcp, remotesupport, ipaddress, subnet, gateway, dns1, dns2, uptime,
+        memory, cf, temperature, os, app, launcher, DPServer, DPClient,
+        firmware, cloud and iot.
+
+        Some of those describe the network the device sits on. See
+        webinfo.SENSITIVE_KEYS for the set to redact before publishing.
+        """
+        return dict(self._webserver_info.system_info)
 
     def register_update_callback(self, callback: UpdateCallback) -> Callable[[], None]:
         """Register a callback for device status updates.
@@ -221,8 +279,10 @@ class AVEDominaClient:
                 timeout=self._connect_timeout,
             )
         except TimeoutError as err:
+            await self._close_owned_session()
             raise AVEDominaTimeoutError(f"Timeout connecting to {self.url}") from err
         except (aiohttp.ClientError, OSError) as err:
+            await self._close_owned_session()
             raise AVEDominaConnectionError(
                 f"Cannot connect to {self.url}: {err}"
             ) from err
@@ -232,6 +292,49 @@ class AVEDominaClient:
         self._connected_event.set()
         self._notify_connection(CONN_STATUS_OPEN)
         self._listen_task = asyncio.ensure_future(self._listen_loop())
+        # Best effort, and deliberately after the WebSocket is up: the HTTP
+        # metadata is a bonus and must never keep connect() from succeeding.
+        await self.fetch_system_info()
+
+    async def _close_owned_session(self) -> None:
+        """Close a session this client created, if any.
+
+        A failed connect() would otherwise leak the session it just opened,
+        which surfaces as aiohttp's "Unclosed client session" warning when
+        the caller gives up rather than retrying.
+        """
+        if self._owns_session and self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None
+
+    async def fetch_system_info(self) -> None:
+        """Re-read the webserver's HTTP metadata.
+
+        Refreshes mac_address, device_type, device_version, plant_code and
+        system_info. Called automatically by connect(); call it directly to
+        refresh without reconnecting.
+
+        Never raises. Anything that goes wrong - port 80 closed, a 404,
+        malformed XML, a timeout - leaves the previous values in place and
+        is logged.
+        """
+        try:
+            if self._session is not None and not self._session.closed:
+                self._webserver_info = await fetch_webserver_info(
+                    self._session, self.host, self._http_port, self._http_timeout
+                )
+                return
+            # No usable session (called before connect); use a temporary one.
+            async with aiohttp.ClientSession() as session:
+                self._webserver_info = await fetch_webserver_info(
+                    session, self.host, self._http_port, self._http_timeout
+                )
+        except Exception:
+            _LOGGER.warning(
+                "Could not read webserver metadata from %s; continuing without it",
+                self.host,
+                exc_info=True,
+            )
 
     async def disconnect(self) -> None:
         """Disconnect from the server."""
@@ -504,24 +607,42 @@ class AVEDominaClient:
         """Toggle a thermostat's keyboard lock."""
         await self.send_command(CMD_THERMOSTAT_KEYBOARD_LOCK, [device_id])
 
-    async def set_thermostat_set_point(self, device_id: str, set_point: float) -> None:
+    async def set_thermostat_set_point(
+        self,
+        device_id: str,
+        set_point: float,
+        switch_to_manual: bool = True,
+    ) -> None:
         """Set a thermostat's target temperature.
 
         set_point is in degrees (e.g. 21.5).
+
+        By default the thermostat is also switched to manual mode, which is
+        what the AVE app does and what users expect. A thermostat left in
+        auto mode accepts the new set point and then reverts to its schedule
+        at the next change point, which looks like the value silently
+        rolling back minutes or hours later. Pass switch_to_manual=False to
+        send the set point without touching the mode.
+
+        Both are sent in a single STS command; the mode is not changed via a
+        separate set_thermostat_mode() call, which would briefly put the
+        thermostat on the previously saved manual set point.
         """
         thermo = self._thermostats.get(device_id)
         if not thermo:
             return
         raw_sp = int(set_point * 10)
+        mode = THERMOSTAT_MODE_MANUAL if switch_to_manual else thermo.mode
         await self.send_command(
             CMD_SET_THERMOSTAT_STATUS,
             [device_id],
-            [[str(thermo.season), str(thermo.mode), str(raw_sp)]],
+            [[str(thermo.season), str(mode), str(raw_sp)]],
         )
         # The server does not reliably echo TP/TM after STS, so update the
         # cached state optimistically and re-read the full status.
         thermo.set_point = set_point
-        if thermo.is_manual_mode:
+        thermo.mode = mode
+        if mode == THERMOSTAT_MODE_MANUAL:
             thermo.manual_set_point = set_point
         await self._refresh_thermostat(device_id)
 

@@ -10,6 +10,7 @@ AI Disclaimer: This project was built using the assistance of Claude Code
 - Full binary protocol implementation (STX/ETX framing, CRC validation)
 - Push-based real-time device status updates
 - Time-based shutter position estimation (`ShutterTravelEstimator`) from configurable open/close travel times, with a helper to measure them against real hardware
+- Webserver metadata over HTTP: MAC address (a stable identifier that survives a DHCP lease change) and firmware/component versions
 - Home Assistant integration with config flow UI
 
 ### Supported devices
@@ -48,15 +49,47 @@ direction stops it instead of moving it.
 
 Both scripts physically move the shutters. `measure_covers.py` merges into
 the config file, so re-measuring one shutter keeps the entries for the rest.
-The JSON file is the CLI stand-in for a Home Assistant options flow, which
-will supply the same numbers to the integration. That options flow and the
-`cover` position support that consumes it are not implemented yet; the SDK
-side (`ShutterTravelEstimator`, `DominaDevice.attach_travel_estimator`) is.
+The JSON file is the CLI stand-in for the Home Assistant integration's
+options flow, which supplies the same numbers there. The integration measures
+travel times through a progress step in that flow, reports estimated cover
+positions, and supports timed `set_position`; these scripts are the way to do
+the same thing without Home Assistant.
+
+### Webserver metadata
+
+Alongside the WebSocket protocol on port 14001, the webserver serves two HTTP
+endpoints on port 80. `connect()` reads both, so the values are available as
+soon as it returns:
+
+```python
+async with AVEDominaClient(host="192.168.1.100") as client:
+    client.mac_address     # '60:e8:5b:16:e2:47' - stable across DHCP changes
+    client.device_type     # 'WBS'
+    client.device_version  # detailed build string
+    client.plant_code      # installation identifier
+    client.system_info     # {'firmware': '164-4', 'DPServer': ..., 'uptime': ...}
+
+    await client.fetch_system_info()   # refresh without reconnecting
+```
+
+Prefer `mac_address` over the host address for anything that has to stay
+stable — entity identifiers keyed on an IP regenerate when the lease changes.
+
+This is best effort and never fatal: if port 80 is closed, an endpoint 404s,
+the XML is malformed or the request times out, `connect()` still succeeds and
+the values are `None` / `{}`. `http_port` and `http_timeout` are constructor
+arguments; the XML is parsed with `defusedxml`.
+
+Some of what `system_info` returns describes the network the device sits on —
+`ipaddress`, `subnet`, `gateway`, `dns1`, `dns2` — and `plant_code` identifies
+the installation. `webinfo.SENSITIVE_KEYS` lists them; redact them before
+publishing this data anywhere, such as in diagnostics attached to a bug report.
 
 ## Requirements
 
 - Python >= 3.13
 - aiohttp >= 3.11
+- defusedxml >= 0.7.1
 
 ## Installation
 
@@ -130,10 +163,11 @@ pyavedominaplus/           Python SDK
   protocol.py              Message encoding/decoding, CRC
   models.py                DominaDevice, DominaThermostat, DominaArea
   travel.py                Time-based shutter position estimation
+  webinfo.py               Webserver HTTP metadata (MAC, system info)
   measure.py               Shutter travel time measurement against hardware
   const.py                 Protocol constants and device types
 
-tests/                     SDK unit tests (330 tests)
+tests/                     SDK unit tests (375 tests)
 
 scripts/                   Utility scripts for hardware testing
   test_hardware.py         Interactive hardware test runner

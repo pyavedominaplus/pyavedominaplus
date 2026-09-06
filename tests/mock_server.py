@@ -216,6 +216,40 @@ _device_statuses: dict[str, int] = {
 # [fan_on, fan_level, configuration, offset, season_bits, temperature, mode, set_point, antifreeze, local_off]
 MOCK_THERMOSTAT_STATUS = ["1", "2", "6", "5", "1", "215", "1", "210", "0", "0"]
 
+# Webserver HTTP payloads, shaped like the real ones: revealcode.php is
+# rooted at <devinfo>, systeminfo.php at <root>, values are padded and unset
+# fields are empty elements. Both answer with Content-Type text/html.
+MOCK_REVEAL_CODE = """<?xml version="1.0" encoding="UTF-8"?>
+<devinfo>
+  <devtype>WBS</devtype>
+  <macaddress>AA:BB:CC:DD:EE:FF</macaddress>
+  <plantcode>1a2b</plantcode>
+  <version>111-222-P84-36|5-32-38-1.5|-39-WBS</version>
+</devinfo>"""
+
+MOCK_SYSTEM_INFO = """<?xml version="1.0"?>
+<root>
+\t<dhcp>0</dhcp>
+\t<remotesupport>1-0-0</remotesupport>
+\t<ipaddress>192.168.1.100</ipaddress>
+\t<subnet>255.255.255.0</subnet>
+\t<gateway>192.168.1.1</gateway>
+\t<dns1>8.8.8.8</dns1>
+\t<dns2></dns2>
+\t<uptime> 77 days</uptime>
+\t<memory>309680/508300</memory>
+\t<cf>58% 1292316</cf>
+\t<temperature>37.80</temperature>
+\t<os>Linux AVE-WS 3.8.13-bone86</os>
+\t<app>1.10.205 (111-222-P84-36)</app>
+\t<launcher>52880-3-Jun20</launcher>
+\t<DPServer>192012-13-Jul02</DPServer>
+\t<DPClient>21936-16-Jun20</DPClient>
+\t<firmware>164-4</firmware>
+\t<cloud>1-1</cloud>
+\t<iot>0-0</iot>
+</root>"""
+
 
 class MockDominaServer:
     """A mock AVE DominaPlus server for testing."""
@@ -246,6 +280,12 @@ class MockDominaServer:
         self.thermostat_status: list[str] = list(MOCK_THERMOSTAT_STATUS)
         self.thermostat_local_off: dict[str, int] = {"103": 0}
         self.received_commands: list[dict] = []
+        # Webserver HTTP endpoints. Set a payload to None to make that
+        # endpoint 404, or to a malformed/partial string to exercise the
+        # parser. http_delay stalls both, for timeout coverage.
+        self.reveal_payload: str | None = MOCK_REVEAL_CODE
+        self.systeminfo_payload: str | None = MOCK_SYSTEM_INFO
+        self.http_delay: float = 0.0
         self._shutter_tasks: dict[str, asyncio.Task] = {}
         # Fractional shutter travel, 0.0 = closed, 1.0 = open. Tracked so a
         # run resumed from a partial position takes only the time the
@@ -258,6 +298,8 @@ class MockDominaServer:
         """Start the mock server and return the assigned port."""
         self._app = web.Application()
         self._app.router.add_get("/", self._handler)
+        self._app.router.add_get("/revealcode.php", self._handle_reveal_code)
+        self._app.router.add_get("/systeminfo.php", self._handle_system_info)
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, self.host, self.port)
@@ -321,6 +363,26 @@ class MockDominaServer:
                 await ws.send_str(text)
             except Exception:  # noqa: BLE001, S110 - a gone client is not a failure
                 pass
+
+    async def _serve_http(self, payload: str | None) -> web.Response:
+        """Serve one of the webserver's HTTP endpoints.
+
+        Content-Type is text/html, matching real hardware, so a consumer
+        that gates on an XML content type would fail against it.
+        """
+        if self.http_delay:
+            await asyncio.sleep(self.http_delay)
+        if payload is None:
+            raise web.HTTPNotFound
+        return web.Response(text=payload, content_type="text/html")
+
+    async def _handle_reveal_code(self, request: web.Request) -> web.Response:
+        """Serve /revealcode.php."""
+        return await self._serve_http(self.reveal_payload)
+
+    async def _handle_system_info(self, request: web.Request) -> web.Response:
+        """Serve /systeminfo.php."""
+        return await self._serve_http(self.systeminfo_payload)
 
     async def _handler(self, request: web.Request) -> web.WebSocketResponse:
         """Handle a WebSocket connection."""

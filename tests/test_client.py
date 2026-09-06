@@ -6,6 +6,7 @@ import pytest
 import pytest_asyncio
 
 from pyavedominaplus.client import AVEDominaClient
+from pyavedominaplus.const import THERMOSTAT_MODE_AUTO, THERMOSTAT_MODE_MANUAL
 from tests.mock_server import MockDominaServer
 
 
@@ -2465,3 +2466,114 @@ class TestReconnectTaskOwnership:
             assert client._reconnect_task is None
         finally:
             await client.disconnect()
+
+
+class TestThermostatSetPointMode:
+    """set_thermostat_set_point must not leave a thermostat on its schedule.
+
+    A set point sent while the thermostat is in auto mode is accepted and
+    then overwritten at the next scheduled change point, which looks to a
+    user like the value silently reverting.
+    """
+
+    @staticmethod
+    def _last_sts(mock_server) -> list[str]:
+        sts = [c for c in mock_server.received_commands if c["command"] == "STS"]
+        assert sts, "no STS command was sent"
+        return sts[-1]["records"][0]
+
+    async def test_switches_a_scheduled_thermostat_to_manual(self, client, mock_server):
+        """The default sends manual in the same STS as the set point."""
+        await client.initialize()
+        assert await client.wait_for_initialization(timeout=5.0)
+        thermo = client.thermostats["103"]
+        thermo.mode = THERMOSTAT_MODE_AUTO
+
+        await client.set_thermostat_set_point("103", 22.5)
+        await asyncio.sleep(0.2)
+
+        season, mode, raw_sp = self._last_sts(mock_server)
+        assert mode == str(THERMOSTAT_MODE_MANUAL)
+        assert raw_sp == "225"
+        assert season == str(thermo.season)
+
+    async def test_updates_cached_mode_and_manual_set_point(self, client, mock_server):
+        """The optimistic cache update follows the mode that was sent."""
+        await client.initialize()
+        assert await client.wait_for_initialization(timeout=5.0)
+        thermo = client.thermostats["103"]
+        thermo.mode = THERMOSTAT_MODE_AUTO
+        thermo.manual_set_point = 18.0
+
+        await client.set_thermostat_set_point("103", 22.5)
+        await asyncio.sleep(0.2)
+
+        assert thermo.mode == THERMOSTAT_MODE_MANUAL
+        assert thermo.set_point == 22.5
+        assert thermo.manual_set_point == 22.5
+
+    async def test_only_one_sts_and_one_wts(self, client, mock_server):
+        """Mode and set point go in a single command, not two.
+
+        Driving the mode separately would send two STS commands and briefly
+        land the thermostat on the previously saved manual set point.
+        """
+        await client.initialize()
+        assert await client.wait_for_initialization(timeout=5.0)
+        client.thermostats["103"].mode = THERMOSTAT_MODE_AUTO
+        before_sts = len(
+            [c for c in mock_server.received_commands if c["command"] == "STS"]
+        )
+        before_wts = len(
+            [c for c in mock_server.received_commands if c["command"] == "WTS"]
+        )
+
+        await client.set_thermostat_set_point("103", 22.5)
+        await asyncio.sleep(0.3)
+
+        sts = [c for c in mock_server.received_commands if c["command"] == "STS"]
+        wts = [c for c in mock_server.received_commands if c["command"] == "WTS"]
+        assert len(sts) - before_sts == 1
+        assert len(wts) - before_wts == 1
+
+    async def test_opt_out_preserves_the_current_mode(self, client, mock_server):
+        """switch_to_manual=False sends the set point without touching mode."""
+        await client.initialize()
+        assert await client.wait_for_initialization(timeout=5.0)
+        thermo = client.thermostats["103"]
+        thermo.mode = THERMOSTAT_MODE_AUTO
+        thermo.manual_set_point = 18.0
+
+        await client.set_thermostat_set_point("103", 22.5, switch_to_manual=False)
+        await asyncio.sleep(0.2)
+
+        _, mode, raw_sp = self._last_sts(mock_server)
+        assert mode == str(THERMOSTAT_MODE_AUTO)
+        assert raw_sp == "225"
+        assert thermo.mode == THERMOSTAT_MODE_AUTO
+        # the saved manual set point is for manual mode only
+        assert thermo.manual_set_point == 18.0
+
+    async def test_already_manual_is_unchanged(self, client, mock_server):
+        """A thermostat already in manual behaves as it always did."""
+        await client.initialize()
+        assert await client.wait_for_initialization(timeout=5.0)
+        thermo = client.thermostats["103"]
+        thermo.mode = THERMOSTAT_MODE_MANUAL
+
+        await client.set_thermostat_set_point("103", 21.0)
+        await asyncio.sleep(0.2)
+
+        _, mode, raw_sp = self._last_sts(mock_server)
+        assert mode == str(THERMOSTAT_MODE_MANUAL)
+        assert raw_sp == "210"
+        assert thermo.manual_set_point == 21.0
+
+    async def test_unknown_thermostat_is_a_no_op(self, client, mock_server):
+        """An unknown device id still returns without sending anything."""
+        await client.initialize()
+        assert await client.wait_for_initialization(timeout=5.0)
+        before = len(mock_server.received_commands)
+        await client.set_thermostat_set_point("does-not-exist", 22.0)
+        await asyncio.sleep(0.1)
+        assert len(mock_server.received_commands) == before

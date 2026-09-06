@@ -61,6 +61,7 @@ from .protocol import (
     encode_message,
 )
 from .travel import ShutterTravelEstimator
+from .webinfo import SENSITIVE_KEYS, WebserverInfo
 
 __all__ = [
     "CONN_STATUS_CLOSE",
@@ -93,6 +94,7 @@ __all__ = [
     "EVENT_THERMOSTAT_WINDOW",
     "SEASON_SUMMER",
     "SEASON_WINTER",
+    "SENSITIVE_KEYS",
     "THERMOSTAT_MODE_AUTO",
     "THERMOSTAT_MODE_MANUAL",
     "AVEDominaClient",
@@ -107,6 +109,7 @@ __all__ = [
     "ShutterTravelEstimator",
     "ShutterTravelMeasurement",
     "UpdateCallback",
+    "WebserverInfo",
     "build_crc",
     "decode_message",
     "encode_message",

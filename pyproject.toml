@@ -29,6 +29,10 @@ dependencies = [
     # 3.11 is pinned because 3.10 deprecated the old float ws timeout
     # and only 3.11 settled the current signature.
     "aiohttp>=3.11",
+    # XML from the webserver's HTTP endpoints is untrusted network input.
+    # Home Assistant constrains this to ==0.7.1 and already ships it, so
+    # this costs a Home Assistant install nothing.
+    "defusedxml>=0.7.1",
 ]
 
 [project.urls]
@@ -43,6 +47,8 @@ dev = [
     "coverage>=7.0",
     "black>=24.0",
     "mypy>=1.0",
+    # stubs so mypy --strict can see through defusedxml
+    "types-defusedxml",
     # 0.16 widened ruff's default rule set; the code is clean against it
     "ruff>=0.16",
     "build>=1.0",

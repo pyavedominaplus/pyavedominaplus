@@ -58,6 +58,16 @@ class ShutterTravelEstimator:
             return self._time_func()
         return time.monotonic()
 
+    @property
+    def open_time(self) -> float:
+        """Return the configured full-travel time for opening, in seconds."""
+        return self._open_time
+
+    @property
+    def close_time(self) -> float:
+        """Return the configured full-travel time for closing, in seconds."""
+        return self._close_time
+
     def _travel_finished(self) -> bool:
         """Return True once the current run has had time to hit its limit.
 
@@ -131,6 +141,28 @@ class ShutterTravelEstimator:
     def stop(self) -> None:
         """Record that the shutter stopped mid-travel."""
         self._position = self.position
+        self._direction = 0
+        self._start_position = None
+
+    def set_position(self, position: float) -> None:
+        """Seed the estimate with a known position (0-100).
+
+        For restoring a previously observed position, e.g. after a consumer
+        restart, when the shutter is part way and no terminal state is
+        available to synchronize against. Without this the estimate stays
+        None and travel_time_to() cannot compute anything until the shutter
+        next runs all the way to a limit.
+
+        This is a restored estimate rather than a terminal synchronization:
+        it behaves exactly like stop() at that position, and a later real
+        terminal state still resynchronizes normally.
+        """
+        if not POSITION_CLOSED <= position <= POSITION_OPEN:
+            raise ValueError(
+                f"position must be between {POSITION_CLOSED} and "
+                f"{POSITION_OPEN} (got {position})"
+            )
+        self._position = position
         self._direction = 0
         self._start_position = None
 

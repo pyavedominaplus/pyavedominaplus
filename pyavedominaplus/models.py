@@ -149,18 +149,34 @@ class DominaDevice:
     def estimated_position(self) -> float | None:
         """Return the time-based position estimate (0-100), if available.
 
-        Requires an attached travel estimator and at least one terminal
-        state (fully open/closed) since attachment; None otherwise.
+        Requires an attached travel estimator and either a seeded
+        initial_position or at least one terminal state (fully open/closed)
+        since attachment; None otherwise.
         """
         if self.travel_estimator is None:
             return None
         return self.travel_estimator.position
 
     def attach_travel_estimator(
-        self, open_time: float, close_time: float
+        self,
+        open_time: float,
+        close_time: float,
+        initial_position: float | None = None,
     ) -> ShutterTravelEstimator:
-        """Attach a travel estimator fed by this device's status updates."""
+        """Attach a travel estimator fed by this device's status updates.
+
+        initial_position (0-100) seeds a previously observed position, so a
+        shutter left part way is locatable straight away rather than after
+        its next full run to a limit.
+
+        The seed is applied before the current status, which resolves the
+        two cases correctly: a device currently reporting a terminal state
+        overrides the seed (a shutter reported closed now is at 0, whatever
+        it was before), while a stopped or not-yet-reported device keeps it.
+        """
         self.travel_estimator = ShutterTravelEstimator(open_time, close_time)
+        if initial_position is not None:
+            self.travel_estimator.set_position(initial_position)
         self.travel_estimator.update_from_status(self.current_value)
         return self.travel_estimator
 
