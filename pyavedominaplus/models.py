@@ -7,24 +7,25 @@ from enum import IntEnum
 
 from .const import (
     DEVICE_TYPE_DIMMER,
+    DEVICE_TYPE_ENERGY,
     DEVICE_TYPE_LIGHT,
     DEVICE_TYPE_LIGHT_22,
+    DEVICE_TYPE_SCENARIO,
     DEVICE_TYPE_SHUTTER,
     DEVICE_TYPE_SHUTTER_16,
     DEVICE_TYPE_SHUTTER_19,
     DEVICE_TYPE_THERMOSTAT,
-    DEVICE_TYPE_SCENARIO,
-    DEVICE_TYPE_ENERGY,
     DEVICE_TYPE_TO_APP_TYPE,
-    SHUTTER_STATUS_OPEN,
-    SHUTTER_STATUS_OPENING,
     SHUTTER_STATUS_CLOSED,
     SHUTTER_STATUS_CLOSING,
+    SHUTTER_STATUS_OPEN,
+    SHUTTER_STATUS_OPENING,
     SHUTTER_STATUS_STOPPED,
-    THERMOSTAT_MODE_AUTO,
     THERMOSTAT_MODE_ANTIFREEZE,
+    THERMOSTAT_MODE_AUTO,
     THERMOSTAT_MODE_MANUAL,
 )
+from .travel import ShutterTravelEstimator
 
 
 class DeviceFamily(IntEnum):
@@ -64,6 +65,9 @@ class DominaDevice:
     current_value: int = 0
     avebus_address: int | None = None
     commands: list[int] = field(default_factory=list)
+    travel_estimator: ShutterTravelEstimator | None = field(
+        default=None, repr=False, compare=False
+    )
 
     @property
     def app_type(self) -> int:
@@ -133,12 +137,38 @@ class DominaDevice:
 
     @property
     def brightness(self) -> int:
-        """Return the brightness level (0-31) for dimmers."""
+        """Return the brightness level on the AVE 0-31 scale.
+
+        Dimmers report their actual level (0-31); on/off devices report
+        31 when on and 0 when off. Consumers that need another scale
+        (e.g. Home Assistant's 0-255) must rescale.
+        """
         return self.current_value if self.is_dimmer else (31 if self.is_on else 0)
+
+    @property
+    def estimated_position(self) -> float | None:
+        """Return the time-based position estimate (0-100), if available.
+
+        Requires an attached travel estimator and at least one terminal
+        state (fully open/closed) since attachment; None otherwise.
+        """
+        if self.travel_estimator is None:
+            return None
+        return self.travel_estimator.position
+
+    def attach_travel_estimator(
+        self, open_time: float, close_time: float
+    ) -> ShutterTravelEstimator:
+        """Attach a travel estimator fed by this device's status updates."""
+        self.travel_estimator = ShutterTravelEstimator(open_time, close_time)
+        self.travel_estimator.update_from_status(self.current_value)
+        return self.travel_estimator
 
     def update_status(self, value: int) -> None:
         """Update the device status value."""
         self.current_value = value
+        if self.travel_estimator is not None:
+            self.travel_estimator.update_from_status(value)
 
 
 @dataclass
@@ -230,15 +260,15 @@ class DominaThermostat:
 
         r = records[0]
         fan_on = int(r[0])
-        self.fan_level = int(r[1])
-        if fan_on == 0:
-            self.fan_level = 0
+        self.fan_level = int(r[1]) if fan_on else 0
         self.configuration = int(r[2])
         self.offset = int(r[3]) / 10.0
         season_bits = int(r[4])
         self.season = season_bits & 0x01
         self.humidity_enabled = bool(season_bits & 0x10)
-        if self.season == 1:
+        # Bit 7 of fan_level encodes winter season; only meaningful while
+        # the fan is actually running.
+        if self.season == 1 and fan_on:
             self.fan_level += 128
         self.temperature = int(r[5]) / 10.0
         self.mode = int(r[6])

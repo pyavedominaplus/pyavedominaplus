@@ -93,6 +93,28 @@ EOT (0x04)
 | `upd` | Status Update                |
 | `ack` | Acknowledgement              |
 
+## Notes from real captures
+
+- **`WSF` is answered with `upd WS`, not `wsf`.** Across every capture in
+  this repo the hardware replies to `WSF <family>` with a stream of
+  individual `upd WS <family> <device_id> <status>` messages (122 of them);
+  not one lowercase `wsf` record response appears. The `wsf` branch is kept
+  for firmware that does reply that way, but do not expect it.
+- **`upd` parameter layout varies by subtype.** `WS` and `WT` put a
+  discriminator in the second field, so their device id is the third
+  (`upd|WS|family|id|status`). Every other observed subtype is
+  `upd|<sub>|<id>|<value>...` with the id second — `TP`, `TM`, `TT`, `TL`,
+  `TK`, `TLO`, `TS`, `TO`, `TR`, `L`, `D`.
+- **`upd D` is keyed by map command id, not device id.** It carries the
+  icon for a map command. On real traffic, the map command pointing at a
+  shutter receives one icon update per status change of that shutter, while
+  the shutter's own device id receives almost none. Icon numbering is per device
+  family — shutters around 184 (185 open, 186 closed, 187 opening, 188
+  closing), lights 147, dimmers 132 — and a `D` message does not say which
+  family it belongs to, so the dissector shows the raw icon id.
+- **The CRC covers the UTF-8 bytes**, so accented device names checksum
+  over their multi-byte encoding rather than their codepoints.
+
 ## Detection
 
 The dissector registers itself in three ways:

@@ -2,7 +2,8 @@
 
 import asyncio
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any, Self
 
 import aiohttp
 
@@ -14,8 +15,8 @@ from .const import (
     CMD_GET_THERMOSTAT_MODE,
     CMD_GET_THERMOSTAT_STATUS,
     CMD_LIGHT_COMMAND,
-    CMD_LIST_DEVICES,
     CMD_LIST_DEVICE_ADDRESSES,
+    CMD_LIST_DEVICES,
     CMD_LIST_MAP_COMMANDS,
     CMD_LIST_MAP_LABELS,
     CMD_LIST_MAPS,
@@ -36,9 +37,28 @@ from .const import (
     DIMMER_CMD_OFF,
     DIMMER_CMD_ON,
     DIMMER_CMD_STEP,
+    EVENT_DEVICE_STATUS,
+    EVENT_HUMIDITY,
+    EVENT_LDI_LOADED,
+    EVENT_LM_LOADED,
+    EVENT_LMC_LOADED,
+    EVENT_RGB,
+    EVENT_THERMOSTAT_FAN_LEVEL,
+    EVENT_THERMOSTAT_FULL_STATUS,
+    EVENT_THERMOSTAT_FUNCTION,
+    EVENT_THERMOSTAT_KEYBOARD_LOCK,
+    EVENT_THERMOSTAT_LOCAL_OFF,
+    EVENT_THERMOSTAT_MODE,
+    EVENT_THERMOSTAT_OFFSET,
+    EVENT_THERMOSTAT_REQUEST,
+    EVENT_THERMOSTAT_SEASON,
+    EVENT_THERMOSTAT_SETPOINT,
+    EVENT_THERMOSTAT_TEMPERATURE,
+    EVENT_THERMOSTAT_WINDOW,
     LIGHT_CMD_OFF,
     LIGHT_CMD_ON,
     LIGHT_CMD_TOGGLE,
+    MAP_COMMAND_TYPE_SCENARIO,
     SHUTTER_CMD_CLOSE,
     SHUTTER_CMD_OPEN,
     THERMOSTAT_MODE_AUTO,
@@ -48,24 +68,25 @@ from .const import (
     UPD_RGB,
     UPD_THERMOSTAT,
     UPD_THERMOSTAT_FANLEVEL_MAP,
+    UPD_THERMOSTAT_FUNCTION,
     UPD_THERMOSTAT_KEYBOARD_LOCK,
     UPD_THERMOSTAT_LOCAL_OFF_MAP,
     UPD_THERMOSTAT_MODE,
     UPD_THERMOSTAT_OFFSET_MAP,
+    UPD_THERMOSTAT_REQUEST,
     UPD_THERMOSTAT_SEASON_MAP,
     UPD_THERMOSTAT_SETPOINT,
     UPD_THERMOSTAT_TEMP_MAP,
-    UPD_THERMOSTAT_FUNCTION,
-    UPD_THERMOSTAT_REQUEST,
     UPD_THERMOSTAT_WINDOW,
 )
+from .exceptions import AVEDominaConnectionError, AVEDominaTimeoutError
 from .models import (
     DominaArea,
     DominaDevice,
     DominaMapCommand,
     DominaThermostat,
 )
-from .protocol import decode_message, encode_message
+from .protocol import ProtocolDecoder, encode_message
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -85,6 +106,8 @@ class AVEDominaClient:
         reconnect_interval: float = 5.0,
         max_reconnect_interval: float = 300.0,
         command_delay: float = 0.3,
+        connect_timeout: float = 10.0,
+        status_settle_timeout: float = 10.0,
     ) -> None:
         self.host = host
         self.port = port
@@ -98,16 +121,22 @@ class AVEDominaClient:
         self._reconnect_interval = reconnect_interval
         self._max_reconnect_interval = max_reconnect_interval
         self._command_delay = command_delay
+        self._connect_timeout = connect_timeout
+        self._status_settle_timeout = status_settle_timeout
         self._devices: dict[str, DominaDevice] = {}
         self._thermostats: dict[str, DominaThermostat] = {}
         self._areas: dict[str, DominaArea] = {}
         self._update_callbacks: list[UpdateCallback] = []
         self._connection_status_callbacks: list[Callable[[str], None]] = []
         self._initialized = asyncio.Event()
+        self._connected_event = asyncio.Event()
+        self._decoder = ProtocolDecoder()
         self._lm_loaded = False
         self._ldi_loaded = False
-        self._lmc_pending = 0
+        self._lmc_pending_areas: set[str] = set()
+        self._statuses_requested = False
         self._pending_devices: set[str] = set()
+        self._status_watchdog_task: asyncio.Task[None] | None = None
 
     @property
     def url(self) -> str:
@@ -167,18 +196,40 @@ class AVEDominaClient:
                 _LOGGER.exception("Error in connection callback")
 
     async def connect(self) -> None:
-        """Connect to the DominaPlus WebSocket server."""
+        """Connect to the DominaPlus WebSocket server.
+
+        Raises AVEDominaTimeoutError if the connection attempt exceeds the
+        configured connect_timeout, or AVEDominaConnectionError for any
+        other connection failure. Both subclass ConnectionError.
+        """
+        if self.connected:
+            return
         _LOGGER.debug("Connecting to %s", self.url)
         if self._owns_session or self._session is None:
+            # Close a leftover owned session from a previous connect
+            if self._owns_session and self._session and not self._session.closed:
+                await self._session.close()
             self._session = aiohttp.ClientSession()
             self._owns_session = True
-        self._ws = await self._session.ws_connect(
-            self.url,
-            protocols=["binary", "base64"],
-            timeout=aiohttp.ClientWSTimeout(ws_close=10.0),
-        )
+        try:
+            self._ws = await asyncio.wait_for(
+                self._session.ws_connect(
+                    self.url,
+                    protocols=["binary", "base64"],
+                    timeout=aiohttp.ClientWSTimeout(ws_close=10.0),
+                ),
+                timeout=self._connect_timeout,
+            )
+        except TimeoutError as err:
+            raise AVEDominaTimeoutError(f"Timeout connecting to {self.url}") from err
+        except (aiohttp.ClientError, OSError) as err:
+            raise AVEDominaConnectionError(
+                f"Cannot connect to {self.url}: {err}"
+            ) from err
         _LOGGER.debug("Connected successfully")
         self._running = True
+        self._decoder.reset()
+        self._connected_event.set()
         self._notify_connection(CONN_STATUS_OPEN)
         self._listen_task = asyncio.ensure_future(self._listen_loop())
 
@@ -186,6 +237,8 @@ class AVEDominaClient:
         """Disconnect from the server."""
         _LOGGER.debug("Disconnecting from %s", self.url)
         self._running = False
+        self._connected_event.clear()
+        self._cancel_status_watchdog()
         if self._reconnect_task and not self._reconnect_task.done():
             self._reconnect_task.cancel()
             try:
@@ -209,12 +262,24 @@ class AVEDominaClient:
         _LOGGER.debug("Disconnected")
         self._notify_connection(CONN_STATUS_CLOSE)
 
+    async def __aenter__(self) -> Self:
+        """Connect on entering an async context."""
+        await self.connect()
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        """Disconnect on leaving an async context."""
+        await self.disconnect()
+
     def _reset_init_state(self) -> None:
         """Reset initialization flags so initialize() works after reconnect."""
+        self._cancel_status_watchdog()
         self._initialized.clear()
+        self._decoder.reset()
         self._lm_loaded = False
         self._ldi_loaded = False
-        self._lmc_pending = 0
+        self._lmc_pending_areas = set()
+        self._statuses_requested = False
         self._pending_devices = set()
 
     async def _reconnect_loop(self) -> None:
@@ -247,9 +312,17 @@ class AVEDominaClient:
                     timeout=aiohttp.ClientWSTimeout(ws_close=10.0),
                 )
                 _LOGGER.info("Reconnected to %s", self.url)
+                self._connected_event.set()
                 self._notify_connection(CONN_STATUS_OPEN)
                 self._listen_task = asyncio.ensure_future(self._listen_loop())
                 await self.initialize()
+                # The socket can die again during initialize(), in which case
+                # the listen loop has already registered a newer reconnect
+                # task. Only clear the reference if it is still ours, or that
+                # newer task becomes unreachable and disconnect() cannot
+                # cancel it.
+                if self._reconnect_task is asyncio.current_task():
+                    self._reconnect_task = None
                 return
             except asyncio.CancelledError:
                 return
@@ -270,7 +343,7 @@ class AVEDominaClient:
         """Send a command to the server.
 
         If auto-reconnect is enabled and the connection is down, waits up to
-        30 seconds for reconnection before raising ConnectionError.
+        30 seconds for reconnection before raising AVEDominaConnectionError.
         """
         if not self.connected:
             if self._auto_reconnect and self._running:
@@ -278,16 +351,14 @@ class AVEDominaClient:
                     "Not connected, waiting for reconnect before sending %s",
                     command,
                 )
-                for _ in range(60):
-                    await asyncio.sleep(0.5)
-                    if self.connected:
-                        break
-                    if not self._running:
-                        break
+                try:
+                    await asyncio.wait_for(self._connected_event.wait(), timeout=30)
+                except TimeoutError:
+                    pass
             if not self.connected:
-                raise ConnectionError("Not connected to DominaPlus server")
+                raise AVEDominaConnectionError("Not connected to DominaPlus server")
         if self._ws is None:
-            raise ConnectionError("Not connected to DominaPlus server")
+            raise AVEDominaConnectionError("Not connected to DominaPlus server")
         msg = encode_message(command, parameters, records)
         _LOGGER.debug(
             "Sending command: %s, params=%s, data=%s",
@@ -381,7 +452,10 @@ class AVEDominaClient:
         """Activate a scenario by finding its map command and executing it."""
         for area in self._areas.values():
             for cmd in area.map_commands:
-                if cmd.device_id == device_id and cmd.command_type == 17:
+                if (
+                    cmd.device_id == device_id
+                    and cmd.command_type == MAP_COMMAND_TYPE_SCENARIO
+                ):
                     await self.send_command(CMD_EXECUTE_SCENARIO, [cmd.command_id])
                     return
         # Fallback: try device_id directly as command_id
@@ -444,6 +518,12 @@ class AVEDominaClient:
             [device_id],
             [[str(thermo.season), str(thermo.mode), str(raw_sp)]],
         )
+        # The server does not reliably echo TP/TM after STS, so update the
+        # cached state optimistically and re-read the full status.
+        thermo.set_point = set_point
+        if thermo.is_manual_mode:
+            thermo.manual_set_point = set_point
+        await self._refresh_thermostat(device_id)
 
     async def set_thermostat_season(self, device_id: str, season: int) -> None:
         """Set a thermostat's season (0=summer, 1=winter)."""
@@ -456,6 +536,8 @@ class AVEDominaClient:
             [device_id],
             [[str(season), str(thermo.mode), str(raw_sp)]],
         )
+        thermo.season = season
+        await self._refresh_thermostat(device_id)
 
     async def set_thermostat_mode(self, device_id: str, mode: int) -> None:
         """Set a thermostat's mode.
@@ -478,6 +560,21 @@ class AVEDominaClient:
             [device_id],
             [[str(thermo.season), str(mode), str(raw_sp)]],
         )
+        thermo.mode = mode
+        thermo.set_point = raw_sp / 10.0
+        await self._refresh_thermostat(device_id)
+
+    async def _refresh_thermostat(self, device_id: str) -> None:
+        """Re-read a thermostat's full status after a change.
+
+        Real hardware does not reliably echo TM/TP updates after an STS
+        command, so a WTS re-read (after the command-stagger delay, giving
+        the server time to apply the change) is the only dependable way to
+        converge on the true state.
+        """
+        if self._command_delay:
+            await asyncio.sleep(self._command_delay)
+        await self.send_command(CMD_GET_THERMOSTAT_STATUS, [device_id], [[""]])
 
     async def _listen_loop(self) -> None:
         """Main loop for receiving messages from the server."""
@@ -504,7 +601,7 @@ class AVEDominaClient:
                     _LOGGER.debug("Ignoring message type: %s", ws_msg.type)
                     continue
                 try:
-                    messages = decode_message(raw)
+                    messages = self._decoder.feed(raw)
                     _LOGGER.debug("Decoded %d message(s)", len(messages))
                     for msg in messages:
                         await self._handle_message(msg)
@@ -518,6 +615,7 @@ class AVEDominaClient:
         except Exception:
             _LOGGER.exception("Error in listen loop")
         finally:
+            self._connected_event.clear()
             if self._running:
                 self._notify_connection(CONN_STATUS_ERROR)
                 if self._auto_reconnect:
@@ -544,6 +642,7 @@ class AVEDominaClient:
             "lml": self._handle_lml,
             "upd": self._handle_upd,
             "wts": self._handle_wts,
+            "wsf": self._handle_wsf,
             "ping": self._handle_ping,
             "ack": self._handle_ack,
             "gsf": self._handle_gsf,
@@ -560,7 +659,6 @@ class AVEDominaClient:
         if self._lm_loaded:
             return
         self._areas.clear()
-        self._lmc_pending = len(records)
         for record in records:
             if len(record) >= 3:
                 area = DominaArea(
@@ -569,19 +667,86 @@ class AVEDominaClient:
                     order=record[2],
                 )
                 self._areas[area.id] = area
+                self._lmc_pending_areas.add(area.id)
                 await self.send_command(CMD_LIST_MAP_COMMANDS, [area.id])
                 await self.send_command(CMD_LIST_MAP_LABELS, [area.id])
         self._lm_loaded = True
-        self._notify_update("lm_loaded", {"areas": self._areas})
+        self._notify_update(EVENT_LM_LOADED, {"areas": self._areas})
+        await self._maybe_request_statuses()
+
+    async def _maybe_request_statuses(self) -> None:
+        """Request device statuses once areas, map commands and devices loaded.
+
+        Runs exactly once per init cycle, only after both the LM/LMC chain
+        and the LDI response have completed, whatever order they arrive in.
+        Duplicate or unmatched lmc responses cannot re-trigger it.
+        """
+        if (
+            not self._lm_loaded
+            or not self._ldi_loaded
+            or self._lmc_pending_areas
+            or self._statuses_requested
+        ):
+            return
+        self._statuses_requested = True
+        await self.request_device_statuses()
+        # If no devices to track, mark initialized now
+        if not self._pending_devices:
+            self._initialized.set()
+        else:
+            self._start_status_watchdog()
+
+    def _start_status_watchdog(self) -> None:
+        """Start the watchdog that completes init despite silent devices."""
+        self._cancel_status_watchdog()
+        if self._status_settle_timeout > 0:
+            self._status_watchdog_task = asyncio.ensure_future(self._status_watchdog())
+
+    def _cancel_status_watchdog(self) -> None:
+        """Cancel a running status watchdog, if any."""
+        if self._status_watchdog_task and not self._status_watchdog_task.done():
+            self._status_watchdog_task.cancel()
+        self._status_watchdog_task = None
+
+    async def _status_watchdog(self) -> None:
+        """Complete initialization when device statuses stop arriving.
+
+        Some devices never answer WSF (unconfigured addresses, families the
+        server does not report). Waiting for every device forever would wedge
+        the client, so initialization also completes once no new status has
+        arrived for status_settle_timeout seconds. The devices still missing
+        keep current_value 0 and are logged.
+        """
+        while True:
+            remaining = len(self._pending_devices)
+            await asyncio.sleep(self._status_settle_timeout)
+            if self._initialized.is_set() or not self._pending_devices:
+                return
+            if len(self._pending_devices) == remaining:
+                _LOGGER.warning(
+                    "No device status received for %.1fs; completing "
+                    "initialization with %d device(s) still unknown: %s",
+                    self._status_settle_timeout,
+                    remaining,
+                    ", ".join(sorted(self._pending_devices)),
+                )
+                self._initialized.set()
+                return
 
     async def _handle_ldi(
         self, parameters: list[str], records: list[list[str]]
     ) -> None:
-        """Handle LDI (list devices) response."""
+        """Handle LDI (list devices) response.
+
+        Existing DominaDevice/DominaThermostat objects are updated in place
+        rather than replaced, so references held by callers (and any attached
+        travel estimator) survive a reconnect. Devices that disappeared from
+        the server's list are dropped.
+        """
         if self._ldi_loaded:
             return
-        self._devices.clear()
-        self._thermostats.clear()
+        seen_devices: set[str] = set()
+        seen_thermostats: set[str] = set()
         for record in records:
             if len(record) < 3:
                 continue
@@ -607,24 +772,42 @@ class AVEDominaClient:
             if is_vmc_daikin:
                 device_id = str(int(device_id) - 10000000)
 
-            device = DominaDevice(
-                id=device_id,
-                name=device_name,
-                device_type=device_type,
-                maps=device_maps,
-            )
-            self._devices[device_id] = device
+            device = self._devices.get(device_id)
+            if device is None:
+                device = DominaDevice(
+                    id=device_id,
+                    name=device_name,
+                    device_type=device_type,
+                    maps=device_maps,
+                )
+                self._devices[device_id] = device
+            else:
+                device.name = device_name
+                device.device_type = device_type
+                device.maps = device_maps
+            seen_devices.add(device_id)
 
             # Create thermostat tracking object
             if device_type == DEVICE_TYPE_THERMOSTAT:
-                thermo = DominaThermostat(
-                    id=device_id,
-                    name=device_name,
-                    is_vmc_daikin=is_vmc_daikin,
-                )
-                self._thermostats[device_id] = thermo
+                thermo = self._thermostats.get(device_id)
+                if thermo is None:
+                    thermo = DominaThermostat(
+                        id=device_id,
+                        name=device_name,
+                        is_vmc_daikin=is_vmc_daikin,
+                    )
+                    self._thermostats[device_id] = thermo
+                else:
+                    thermo.name = device_name
+                    thermo.is_vmc_daikin = is_vmc_daikin
+                seen_thermostats.add(device_id)
                 # Request thermostat status
                 await self.send_command(CMD_GET_THERMOSTAT_STATUS, [device_id], [[""]])
+
+        for stale in set(self._devices) - seen_devices:
+            del self._devices[stale]
+        for stale in set(self._thermostats) - seen_thermostats:
+            del self._thermostats[stale]
 
         self._ldi_loaded = True
         # Track devices that will receive status updates.
@@ -641,7 +824,8 @@ class AVEDominaClient:
         await self.send_command(CMD_GET_NO_ACTION)
         await self.send_command(CMD_LIST_DEVICE_ADDRESSES)
 
-        self._notify_update("ldi_loaded", {"devices": self._devices})
+        self._notify_update(EVENT_LDI_LOADED, {"devices": self._devices})
+        await self._maybe_request_statuses()
 
     async def _handle_li2(
         self, parameters: list[str], records: list[list[str]]
@@ -681,16 +865,12 @@ class AVEDominaClient:
                 )
                 area.map_commands.append(mc)
             self._notify_update(
-                "lmc_loaded", {"area_id": area_id, "commands": area.map_commands}
+                EVENT_LMC_LOADED, {"area_id": area_id, "commands": area.map_commands}
             )
 
-        self._lmc_pending -= 1
-        if self._lmc_pending <= 0:
-            # All map commands loaded, request device statuses
-            await self.request_device_statuses()
-            # If no devices to track, mark initialized now
-            if not self._pending_devices:
-                self._initialized.set()
+        if area_id is not None:
+            self._lmc_pending_areas.discard(area_id)
+        await self._maybe_request_statuses()
 
     async def _handle_upd(
         self, parameters: list[str], records: list[list[str]]
@@ -711,10 +891,9 @@ class AVEDominaClient:
                 if device:
                     device.update_status(device_status)
                 self._pending_devices.discard(device_id)
-                if not self._pending_devices and not self._initialized.is_set():
-                    self._initialized.set()
+                self._check_initialized()
                 self._notify_update(
-                    "device_status",
+                    EVENT_DEVICE_STATUS,
                     {
                         "device_id": device_id,
                         "device_type": device_type,
@@ -734,7 +913,7 @@ class AVEDominaClient:
                     if thermo.is_manual_mode:
                         thermo.manual_set_point = thermo.set_point
                 self._notify_update(
-                    "thermostat_setpoint",
+                    EVENT_THERMOSTAT_SETPOINT,
                     {"device_id": device_id, "set_point": parameters[2]},
                 )
 
@@ -753,7 +932,7 @@ class AVEDominaClient:
                 if thermo:
                     thermo.mode = mode_int
                 self._notify_update(
-                    "thermostat_mode",
+                    EVENT_THERMOSTAT_MODE,
                     {"device_id": device_id, "mode": mode_int},
                 )
 
@@ -764,7 +943,7 @@ class AVEDominaClient:
                 if thermo:
                     thermo.keyboard_lock = int(parameters[2])
                 self._notify_update(
-                    "thermostat_keyboard_lock",
+                    EVENT_THERMOSTAT_KEYBOARD_LOCK,
                     {"device_id": device_id, "keyboard_lock": parameters[2]},
                 )
 
@@ -775,7 +954,7 @@ class AVEDominaClient:
                 if thermo:
                     thermo.window_state = int(parameters[2])
                 self._notify_update(
-                    "thermostat_window",
+                    EVENT_THERMOSTAT_WINDOW,
                     {"device_id": device_id, "window_state": parameters[2]},
                 )
 
@@ -795,7 +974,7 @@ class AVEDominaClient:
                         thermo.humidity_threshold_m = int(parameters[4])
                         thermo.humidity_threshold_h = int(parameters[5])
                 self._notify_update(
-                    "humidity",
+                    EVENT_HUMIDITY,
                     {"device_id": device_id, "humidity": int(parameters[2])},
                 )
 
@@ -812,7 +991,7 @@ class AVEDominaClient:
                     if thermo:
                         thermo.local_off = local_off
                     self._notify_update(
-                        "thermostat_local_off",
+                        EVENT_THERMOSTAT_LOCAL_OFF,
                         {"device_id": resolved_id, "local_off": str(local_off)},
                     )
 
@@ -825,7 +1004,7 @@ class AVEDominaClient:
                     if thermo:
                         thermo.season = int(parameters[2])
                     self._notify_update(
-                        "thermostat_season",
+                        EVENT_THERMOSTAT_SEASON,
                         {"device_id": resolved_id, "season": parameters[2]},
                     )
 
@@ -838,7 +1017,7 @@ class AVEDominaClient:
                     if thermo:
                         thermo.update_temperature(parameters[2])
                     self._notify_update(
-                        "thermostat_temperature",
+                        EVENT_THERMOSTAT_TEMPERATURE,
                         {"device_id": resolved_id, "temperature": parameters[2]},
                     )
 
@@ -851,7 +1030,7 @@ class AVEDominaClient:
                     if thermo:
                         thermo.update_offset(parameters[2])
                     self._notify_update(
-                        "thermostat_offset",
+                        EVENT_THERMOSTAT_OFFSET,
                         {"device_id": resolved_id, "offset": parameters[2]},
                     )
 
@@ -864,7 +1043,7 @@ class AVEDominaClient:
                     if thermo:
                         thermo.fan_level = int(parameters[2])
                     self._notify_update(
-                        "thermostat_fan_level",
+                        EVENT_THERMOSTAT_FAN_LEVEL,
                         {"device_id": resolved_id, "fan_level": parameters[2]},
                     )
 
@@ -874,7 +1053,7 @@ class AVEDominaClient:
             if len(parameters) >= 3:
                 device_id = parameters[1]
                 self._notify_update(
-                    "thermostat_function",
+                    EVENT_THERMOSTAT_FUNCTION,
                     {"device_id": device_id, "parameters": parameters[2:]},
                 )
 
@@ -883,12 +1062,12 @@ class AVEDominaClient:
             if len(parameters) >= 3:
                 device_id = parameters[1]
                 self._notify_update(
-                    "thermostat_request",
+                    EVENT_THERMOSTAT_REQUEST,
                     {"device_id": device_id, "value": parameters[2]},
                 )
 
         elif upd_type == UPD_RGB:
-            self._notify_update("rgb", {"parameters": parameters})
+            self._notify_update(EVENT_RGB, {"parameters": parameters})
 
     def _resolve_device_id(self, id_or_map_cmd: str) -> str | None:
         """Resolve a device_id from either a direct device ID or a map command ID.
@@ -920,35 +1099,35 @@ class AVEDominaClient:
             if thermo:
                 thermo.update_temperature(value)
             self._notify_update(
-                "thermostat_temperature",
+                EVENT_THERMOSTAT_TEMPERATURE,
                 {"device_id": device_id, "temperature": value},
             )
         elif sub_type == "S":  # Season
             if thermo:
                 thermo.season = int(value)
             self._notify_update(
-                "thermostat_season",
+                EVENT_THERMOSTAT_SEASON,
                 {"device_id": device_id, "season": value},
             )
         elif sub_type == "O":  # Offset
             if thermo:
                 thermo.update_offset(value)
             self._notify_update(
-                "thermostat_offset",
+                EVENT_THERMOSTAT_OFFSET,
                 {"device_id": device_id, "offset": value},
             )
         elif sub_type == "L":  # Fan level
             if thermo:
                 thermo.fan_level = int(value)
             self._notify_update(
-                "thermostat_fan_level",
+                EVENT_THERMOSTAT_FAN_LEVEL,
                 {"device_id": device_id, "fan_level": value},
             )
         elif sub_type == "Z":  # Local OFF
             if thermo:
                 thermo.local_off = int(value)
             self._notify_update(
-                "thermostat_local_off",
+                EVENT_THERMOSTAT_LOCAL_OFF,
                 {"device_id": device_id, "local_off": value},
             )
 
@@ -963,12 +1142,65 @@ class AVEDominaClient:
         if thermo and records:
             thermo.update_from_wts(records)
             self._pending_devices.discard(device_id)
-            if not self._pending_devices and not self._initialized.is_set():
-                self._initialized.set()
+            self._check_initialized()
             self._notify_update(
-                "thermostat_full_status",
+                EVENT_THERMOSTAT_FULL_STATUS,
                 {"device_id": device_id, "thermostat": thermo},
             )
+
+    async def _handle_wsf(
+        self, parameters: list[str], records: list[list[str]]
+    ) -> None:
+        """Handle WSF (device statuses by family) response.
+
+        Records are [device_id, status] pairs for every device of the
+        requested family (parameters[0]).
+
+        Note: every capture in this repo shows the hardware answering WSF
+        with a stream of individual `upd WS family id status` messages, not
+        with a wsf record message. This handler covers the record form the
+        Wireshark dissector documents; the UPD WS path is the one real
+        hardware exercises.
+        """
+        try:
+            device_type = int(parameters[0]) if parameters else 0
+        except ValueError:
+            device_type = 0
+        for record in records:
+            if len(record) < 2:
+                continue
+            device_id = record[0]
+            try:
+                device_status = int(record[1])
+            except ValueError:
+                continue
+            device = self._devices.get(device_id)
+            if device:
+                device.update_status(device_status)
+            self._pending_devices.discard(device_id)
+            self._notify_update(
+                EVENT_DEVICE_STATUS,
+                {
+                    "device_id": device_id,
+                    "device_type": device_type,
+                    "status": device_status,
+                },
+            )
+        self._check_initialized()
+
+    def _check_initialized(self) -> None:
+        """Mark initialization complete once all pending statuses arrived.
+
+        Gated on _statuses_requested so a stray update arriving before the
+        device list is loaded cannot mark the client initialized early.
+        """
+        if (
+            self._statuses_requested
+            and not self._pending_devices
+            and not self._initialized.is_set()
+        ):
+            self._cancel_status_watchdog()
+            self._initialized.set()
 
     async def _handle_ping(
         self, parameters: list[str], records: list[list[str]]
@@ -980,30 +1212,26 @@ class AVEDominaClient:
         self, parameters: list[str], records: list[list[str]]
     ) -> None:
         """Handle ACK - no operation needed."""
-        pass
 
     async def _handle_lml(
         self, parameters: list[str], records: list[list[str]]
     ) -> None:
         """Handle LML (list map labels) response - no action needed."""
-        pass
 
     async def _handle_gsf(
         self, parameters: list[str], records: list[list[str]]
     ) -> None:
         """Handle GSF (get sensor family) response."""
-        pass
 
     async def _handle_net(
         self, parameters: list[str], records: list[list[str]]
     ) -> None:
         """Handle NET (network status) messages - no action needed."""
-        pass
 
     async def wait_for_initialization(self, timeout: float = 30.0) -> bool:
         """Wait for the initial data load to complete."""
         try:
             await asyncio.wait_for(self._initialized.wait(), timeout=timeout)
             return True
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return False

@@ -1,26 +1,26 @@
 """Tests for AVE DominaPlus data models."""
 
+from pyavedominaplus.const import (
+    APP_TYPE_LIGHT,
+    APP_TYPE_SCENARIO,
+    APP_TYPE_SHUTTER,
+    APP_TYPE_THERMOSTAT,
+    DEVICE_TYPE_DIMMER,
+    DEVICE_TYPE_ENERGY,
+    DEVICE_TYPE_LIGHT,
+    DEVICE_TYPE_LIGHT_22,
+    DEVICE_TYPE_SCENARIO,
+    DEVICE_TYPE_SHUTTER,
+    DEVICE_TYPE_SHUTTER_16,
+    DEVICE_TYPE_SHUTTER_19,
+    DEVICE_TYPE_THERMOSTAT,
+)
 from pyavedominaplus.models import (
     DominaArea,
     DominaDevice,
     DominaMapCommand,
     DominaThermostat,
     ThermoSeason,
-)
-from pyavedominaplus.const import (
-    DEVICE_TYPE_LIGHT,
-    DEVICE_TYPE_DIMMER,
-    DEVICE_TYPE_SHUTTER,
-    DEVICE_TYPE_THERMOSTAT,
-    DEVICE_TYPE_SCENARIO,
-    DEVICE_TYPE_ENERGY,
-    DEVICE_TYPE_LIGHT_22,
-    DEVICE_TYPE_SHUTTER_16,
-    DEVICE_TYPE_SHUTTER_19,
-    APP_TYPE_LIGHT,
-    APP_TYPE_SHUTTER,
-    APP_TYPE_THERMOSTAT,
-    APP_TYPE_SCENARIO,
 )
 
 
@@ -357,11 +357,11 @@ class TestDominaDeviceExtended:
         assert not dev.is_on
 
     def test_brightness_dimmer_max(self):
-        """Test dimmer brightness at max."""
+        """Test dimmer brightness at max (AVE dimmers use a 0-31 scale)."""
         dev = DominaDevice(
-            id="101", name="Dimmer", device_type=DEVICE_TYPE_DIMMER, current_value=254
+            id="101", name="Dimmer", device_type=DEVICE_TYPE_DIMMER, current_value=31
         )
-        assert dev.brightness == 254
+        assert dev.brightness == 31
 
     def test_unknown_device_type_app_type(self):
         """Test app_type for an unknown device type returns the type itself."""
@@ -445,6 +445,20 @@ class TestDominaThermostatExtended:
         records = [["0", "3", "6", "5", "0", "215", "1", "210", "0", "0"]]
         thermo.update_from_wts(records)
         assert thermo.fan_level == 0  # fan_on=0 resets fan_level
+
+    def test_update_from_wts_fan_off_winter(self):
+        """Fan off in winter must report 0, not the +128 season offset."""
+        thermo = DominaThermostat(id="103", name="LR")
+        records = [["0", "3", "6", "5", "1", "215", "1", "210", "0", "0"]]
+        thermo.update_from_wts(records)
+        assert thermo.fan_level == 0
+
+    def test_update_from_wts_fan_on_winter(self):
+        """Fan on in winter carries the +128 season offset."""
+        thermo = DominaThermostat(id="103", name="LR")
+        records = [["1", "3", "6", "5", "1", "215", "1", "210", "0", "0"]]
+        thermo.update_from_wts(records)
+        assert thermo.fan_level == 131
 
     def test_update_from_wts_keyboard_lock_bit(self):
         """Test WTS extracts keyboard lock from configuration."""

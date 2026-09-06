@@ -205,3 +205,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Packet captures and CLI travel-time config: these contain real device
+# names, ids and host addresses from whatever system they were taken on.
+*.pcap
+*.pcapng
+shutter_travel_times.json

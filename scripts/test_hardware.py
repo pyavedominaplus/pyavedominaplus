@@ -61,20 +61,29 @@ def print_thermo_state(thermo) -> None:
     )
 
 
-def ask(prompt: str) -> str:
+async def prompt(text: str) -> str:
+    """Read a line from the user without blocking the event loop.
+
+    input() would stall the loop, so the client could not answer the
+    server's keepalive pings while a prompt sits unanswered.
+    """
+    return (await asyncio.to_thread(input, text)).strip()
+
+
+async def ask(question: str) -> str:
     """Prompt the user and return their input (lowercase, stripped)."""
-    return input(f"\n  {prompt} [y/n/skip]: ").strip().lower()
+    return (await prompt(f"\n  {question} [y/n/skip]: ")).lower()
 
 
-def confirm(prompt: str) -> bool | None:
+async def confirm(question: str) -> bool | None:
     """Ask user to confirm. Returns True, False, or None (skip)."""
-    ans = ask(prompt)
+    ans = await ask(question)
     if ans.startswith("s"):
         return None
     return ans.startswith("y")
 
 
-def pick_device(devices: list, category: str) -> object | None:
+async def pick_device(devices: list, category: str) -> object | None:
     """Let the user pick a device from a list, or skip."""
     if not devices:
         print(f"\n  No {category} devices found, skipping.")
@@ -82,8 +91,8 @@ def pick_device(devices: list, category: str) -> object | None:
     if len(devices) == 1:
         d = devices[0]
         print(f"\n  Found 1 {category}: [{d.id}] {d.name}")
-        ans = ask(f"Use this device for {category} tests?")
-        if ans.startswith("s") or ans.startswith("n"):
+        ans = await ask(f"Use this device for {category} tests?")
+        if ans.startswith(("s", "n")):
             return None
         return d
     print(f"\n  Found {len(devices)} {category} devices:")
@@ -92,7 +101,7 @@ def pick_device(devices: list, category: str) -> object | None:
             f"    {i + 1}. [{d.id}] {d.name} (type {d.device_type}, value={d.current_value})"
         )
     while True:
-        choice = input(f"  Pick a number (1-{len(devices)}) or 's' to skip: ").strip()
+        choice = await prompt(f"  Pick a number (1-{len(devices)}) or 's' to skip: ")
         if choice.lower() == "s":
             return None
         try:
@@ -120,7 +129,7 @@ async def wait_for_update(
     unsub = client.register_update_callback(_on_update)
     try:
         await asyncio.wait_for(event.wait(), timeout=timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         pass
     unsub()
     return received
@@ -145,7 +154,7 @@ async def test_light(client: AVEDominaClient, device):
     await client.turn_on_light(device.id)
     await wait_for_update(client, device.id)
     print_device_state(device)
-    result = confirm("Is the light ON?")
+    result = await confirm("Is the light ON?")
     if result is None:
         skipped += 1
     elif result:
@@ -159,7 +168,7 @@ async def test_light(client: AVEDominaClient, device):
     await client.turn_off_light(device.id)
     await wait_for_update(client, device.id)
     print_device_state(device)
-    result = confirm("Is the light OFF?")
+    result = await confirm("Is the light OFF?")
     if result is None:
         skipped += 1
     elif result:
@@ -173,7 +182,7 @@ async def test_light(client: AVEDominaClient, device):
     await client.toggle_light(device.id)
     await wait_for_update(client, device.id)
     print_device_state(device)
-    result = confirm("Did the light toggle?")
+    result = await confirm("Did the light toggle?")
     if result is None:
         skipped += 1
     elif result:
@@ -207,7 +216,7 @@ async def test_dimmer(client: AVEDominaClient, device):
     await client.turn_on_dimmer(device.id)
     await wait_for_update(client, device.id)
     print_dimmer_state(device)
-    result = confirm("Is the dimmer ON?")
+    result = await confirm("Is the dimmer ON?")
     if result is None:
         skipped += 1
     elif result:
@@ -221,7 +230,7 @@ async def test_dimmer(client: AVEDominaClient, device):
     await client.set_dimmer_level(device.id, 31)
     await wait_for_update(client, device.id)
     print_dimmer_state(device)
-    result = confirm("Is brightness at maximum?")
+    result = await confirm("Is brightness at maximum?")
     if result is None:
         skipped += 1
     elif result:
@@ -235,7 +244,7 @@ async def test_dimmer(client: AVEDominaClient, device):
     await client.set_dimmer_level(device.id, 15)
     await wait_for_update(client, device.id)
     print_dimmer_state(device)
-    result = confirm("Is brightness at about half?")
+    result = await confirm("Is brightness at about half?")
     if result is None:
         skipped += 1
     elif result:
@@ -249,7 +258,7 @@ async def test_dimmer(client: AVEDominaClient, device):
     await client.set_dimmer_level(device.id, 1)
     await wait_for_update(client, device.id)
     print_dimmer_state(device)
-    result = confirm("Is brightness at minimum?")
+    result = await confirm("Is brightness at minimum?")
     if result is None:
         skipped += 1
     elif result:
@@ -263,7 +272,7 @@ async def test_dimmer(client: AVEDominaClient, device):
     await client.turn_off_dimmer(device.id)
     await wait_for_update(client, device.id)
     print_dimmer_state(device)
-    result = confirm("Is the dimmer OFF?")
+    result = await confirm("Is the dimmer OFF?")
     if result is None:
         skipped += 1
     elif result:
@@ -291,7 +300,7 @@ async def test_shutter(client: AVEDominaClient, device):
     await client.open_shutter(device.id)
     await wait_for_update(client, device.id)
     print_shutter_state(device)
-    result = confirm("Is the shutter opening/open?")
+    result = await confirm("Is the shutter opening/open?")
     if result is None:
         skipped += 1
     elif result:
@@ -311,7 +320,7 @@ async def test_shutter(client: AVEDominaClient, device):
     await client.stop_shutter(device.id)
     await wait_for_update(client, device.id)
     print_shutter_state(device)
-    result = confirm("Did the shutter stop?")
+    result = await confirm("Did the shutter stop?")
     if result is None:
         skipped += 1
     elif result:
@@ -327,7 +336,7 @@ async def test_shutter(client: AVEDominaClient, device):
     await client.close_shutter(device.id)
     await wait_for_update(client, device.id)
     print_shutter_state(device)
-    result = confirm("Is the shutter closing/closed?")
+    result = await confirm("Is the shutter closing/closed?")
     if result is None:
         skipped += 1
     elif result:
@@ -370,7 +379,7 @@ async def test_thermostat(client: AVEDominaClient, device):
         await client.turn_off_thermostat(device.id)
         await wait_for_update(client, device.id)
         print_thermo_state(thermo)
-        result = confirm("Is the thermostat OFF?")
+        result = await confirm("Is the thermostat OFF?")
         if result is None:
             skipped += 1
         elif result:
@@ -386,7 +395,7 @@ async def test_thermostat(client: AVEDominaClient, device):
     await client.turn_on_thermostat(device.id)
     await wait_for_update(client, device.id)
     print_thermo_state(thermo)
-    result = confirm("Is the thermostat ON?")
+    result = await confirm("Is the thermostat ON?")
     if result is None:
         skipped += 1
     elif result:
@@ -409,7 +418,9 @@ async def test_thermostat(client: AVEDominaClient, device):
     await client.send_command("WTS", [device.id], [[""]])
     await wait_for_update(client, device.id)
     print_thermo_state(thermo)
-    result = confirm(f"Did the set point change? (set_point={thermo.set_point}°C)")
+    result = await confirm(
+        f"Did the set point change? (set_point={thermo.set_point}°C)"
+    )
     if result is None:
         skipped += 1
     elif result:
@@ -435,7 +446,7 @@ async def test_thermostat(client: AVEDominaClient, device):
     await client.send_command("WTS", [device.id], [[""]])
     await wait_for_update(client, device.id)
     print_thermo_state(thermo)
-    result = confirm(
+    result = await confirm(
         f"Did the season change to {season_name}? (season={thermo.season})"
     )
     if result is None:
@@ -463,7 +474,9 @@ async def test_thermostat(client: AVEDominaClient, device):
     await client.send_command("WTS", [device.id], [[""]])
     await wait_for_update(client, device.id)
     print_thermo_state(thermo)
-    result = confirm(f"Is the thermostat in auto/schedule mode? (mode={thermo.mode})")
+    result = await confirm(
+        f"Is the thermostat in auto/schedule mode? (mode={thermo.mode})"
+    )
     if result is None:
         skipped += 1
     elif result:
@@ -480,7 +493,7 @@ async def test_thermostat(client: AVEDominaClient, device):
     await client.send_command("WTS", [device.id], [[""]])
     await wait_for_update(client, device.id)
     print_thermo_state(thermo)
-    result = confirm(f"Is the thermostat in manual mode? (mode={thermo.mode})")
+    result = await confirm(f"Is the thermostat in manual mode? (mode={thermo.mode})")
     if result is None:
         skipped += 1
     elif result:
@@ -515,7 +528,7 @@ async def test_scenario(client: AVEDominaClient, device):
     print("\n  >> Activating scenario...")
     await client.activate_scenario(device.id)
     await asyncio.sleep(1)
-    result = confirm("Did the scenario activate? (check physical devices)")
+    result = await confirm("Did the scenario activate? (check physical devices)")
     if result is None:
         skipped += 1
     elif result:
@@ -540,7 +553,7 @@ async def main(host: str, port: int):
     try:
         print("  Initializing (loading devices, areas, statuses)...")
         await client.initialize()
-        ok = await client.wait_for_initialization(timeout=15.0)
+        ok = await client.wait_for_initialization(timeout=60.0)
         if not ok:
             print("  ERROR: Initialization timed out!")
             return
@@ -581,7 +594,7 @@ async def main(host: str, port: int):
         ]
 
         for category, devices, test_fn in test_plan:
-            device = pick_device(devices, category)
+            device = await pick_device(devices, category)
             if device is None:
                 continue
             p, f, s = await test_fn(client, device)
