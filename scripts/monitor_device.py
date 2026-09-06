@@ -31,8 +31,12 @@ def clear_screen():
     os.system("cls" if os.name == "nt" else "clear")
 
 
-def pick_device(devices: list) -> object | None:
-    """Let the user pick a device from a list."""
+async def pick_device(devices: list) -> object | None:
+    """Let the user pick a device from a list.
+
+    Reads on a worker thread: a blocking input() would stall the event
+    loop and stop the client answering the server's keepalive pings.
+    """
     if not devices:
         print("  No devices found.")
         return None
@@ -45,7 +49,11 @@ def pick_device(devices: list) -> object | None:
         )
 
     while True:
-        choice = input(f"\n  Pick a device (1-{len(devices)}) or 'q' to quit: ").strip()
+        choice = (
+            await asyncio.to_thread(
+                input, f"\n  Pick a device (1-{len(devices)}) or 'q' to quit: "
+            )
+        ).strip()
         if choice.lower() == "q":
             return None
         try:
@@ -179,7 +187,7 @@ async def main(host: str, port: int, device_id: str | None = None):
     try:
         print("  Initializing (loading devices, areas, statuses)...")
         await client.initialize()
-        ok = await client.wait_for_initialization(timeout=15.0)
+        ok = await client.wait_for_initialization(timeout=60.0)
         if not ok:
             print("  ERROR: Initialization timed out!")
             return
@@ -193,7 +201,7 @@ async def main(host: str, port: int, device_id: str | None = None):
             all_devices = sorted(
                 client.devices.values(), key=lambda d: (d.device_type, d.name)
             )
-            device = pick_device(all_devices)
+            device = await pick_device(all_devices)
             if device is None:
                 return
 

@@ -9,7 +9,7 @@ AI Disclaimer: This project was built using the assistance of Claude Code
 - Async WebSocket client with automatic ping/pong keepalive
 - Full binary protocol implementation (STX/ETX framing, CRC validation)
 - Push-based real-time device status updates
-- Time-based shutter position estimation (`ShutterTravelEstimator`) from configurable open/close travel times
+- Time-based shutter position estimation (`ShutterTravelEstimator`) from configurable open/close travel times, with a helper to measure them against real hardware
 - Home Assistant integration with config flow UI
 
 ### Supported devices
@@ -18,10 +18,40 @@ AI Disclaimer: This project was built using the assistance of Claude Code
 |---|---|---|
 | Light (type 1, 22) | `light` | On/off, toggle |
 | Dimmer (type 2) | `light` | On/off, toggle, brightness (0-31) |
-| Shutter (type 3, 16, 19) | `cover` | Open, close, stop, position (time-based estimate) |
+| Shutter (type 3, 16, 19) | `cover` | Open, close, stop |
 | Thermostat (type 4) | `climate` | Temperature setpoint, season mode, on/off, keyboard lock |
 | Scenario (type 6) | `switch` | Activate |
 | Energy meter (type 9) | — | Read-only |
+
+### Shutter travel times
+
+Position estimation needs a full-travel time per direction per shutter.
+Measure them, then verify the estimate against the hardware:
+
+```bash
+python scripts/measure_covers.py 192.168.1.100        # writes shutter_travel_times.json
+python scripts/test_cover_position.py 192.168.1.100   # drive it to percentages
+```
+
+`test_cover_position.py` is interactive. The cover has to start fully open
+or closed, since a partial position cannot be known; if it is part way, the
+first step opens it to establish the reference. Then enter a target from 0
+(closed) to 100 (open) in steps of 10 and it drives there, reporting the
+predicted travel time against the time the move actually took. Repeat from
+wherever it now is; `q` closes the cover and exits.
+
+Moves started at the physical wall switch are tracked too: the server pushes
+the same status updates whoever started the move, so the estimate follows
+along. A wall move in progress is waited out before the script sends
+anything, because commanding a cover that is already travelling in that
+direction stops it instead of moving it.
+
+Both scripts physically move the shutters. `measure_covers.py` merges into
+the config file, so re-measuring one shutter keeps the entries for the rest.
+The JSON file is the CLI stand-in for a Home Assistant options flow, which
+will supply the same numbers to the integration. That options flow and the
+`cover` position support that consumes it are not implemented yet; the SDK
+side (`ShutterTravelEstimator`, `DominaDevice.attach_travel_estimator`) is.
 
 ## Requirements
 
@@ -100,14 +130,17 @@ pyavedominaplus/           Python SDK
   protocol.py              Message encoding/decoding, CRC
   models.py                DominaDevice, DominaThermostat, DominaArea
   travel.py                Time-based shutter position estimation
+  measure.py               Shutter travel time measurement against hardware
   const.py                 Protocol constants and device types
 
-tests/                     SDK unit tests (269 tests)
+tests/                     SDK unit tests (330 tests)
 
 scripts/                   Utility scripts for hardware testing
   test_hardware.py         Interactive hardware test runner
   monitor_device.py        Live device state monitor
-  measure_covers.py        Measure shutter travel times for position estimation
+  measure_covers.py        Measure shutter travel times, write them to the config
+  test_cover_position.py   Interactively drive a cover to percentage positions
+  shutter_config.py        Travel time config file shared by the two above
 
 extract_pcap.py            PCAP extractor with WebSocket frame parsing
 
@@ -184,7 +217,8 @@ The client follows the same initialization sequence as the original AVE webapp:
 3. For each thermostat, request `WTS` (full thermostat status)
 4. After all `LMC` responses arrive, subscribe to updates (`SU2`, `SU3`) and request device statuses via `WSF` for each device family
 5. WSF commands are **staggered with ~300ms delays** between each — sending them all at once overwhelms the hardware and causes dropped responses
-6. Initialization is complete once all devices have received their status via `wsf` records (or legacy `UPD WS` messages) and `WTS` responses
+6. Initialization is complete once all devices have received their status via `UPD WS` messages (the form every capture in this repo shows; the `wsf` record response the dissector documents is also handled) and `WTS` responses
+7. Devices that never answer would otherwise wedge the client, so initialization also completes once no new status has arrived for `status_settle_timeout` seconds (default 10); the devices still missing are logged and keep `current_value` 0
 
 ### Shutter status values
 

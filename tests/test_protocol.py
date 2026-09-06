@@ -1,7 +1,10 @@
 """Tests for AVE DominaPlus protocol encoding/decoding."""
 
+import pytest
+
 from pyavedominaplus.const import STX, ETX, EOT, GS, RS
 from pyavedominaplus.protocol import (
+    ProtocolDecoder,
     build_crc,
     decode_message,
     encode_message,
@@ -415,3 +418,50 @@ class TestDecodeMessageCRC:
         raw[-2] = ord("0") if raw[-2] != ord("0") else ord("1")
         msgs = decode_message(bytes(raw))
         assert [m["command"] for m in msgs] == ["ack"]
+
+
+class TestCRCOverBytes:
+    """The CRC covers the UTF-8 bytes on the wire, not Unicode codepoints."""
+
+    @staticmethod
+    def _hardware_frame(command: str, records: list[list[str]]) -> bytes:
+        """Build a frame the way the hardware does: CRC over the sent bytes."""
+        msg = chr(STX) + command
+        for record in records:
+            msg += chr(RS) + chr(GS).join(record)
+        msg += chr(ETX)
+        payload = msg.encode("utf-8")
+        crc = 0
+        for byte in payload:
+            crc ^= byte
+        return payload + f"{0xFF - crc:02X}".encode() + bytes([EOT])
+
+    def test_build_crc_accepts_bytes_and_str_alike(self):
+        assert build_crc("abc") == build_crc(b"abc")
+
+    def test_build_crc_uses_utf8_bytes_for_non_ascii(self):
+        """'a' is 0xC3 0xA0 on the wire, not codepoint 0xE0."""
+        assert build_crc("à") == build_crc(b"\xc3\xa0")
+
+    @pytest.mark.parametrize(
+        "name", ["Window Blind", "Wíndow Blínd", "Blind 20°", "café"]
+    )
+    def test_accented_device_names_survive_crc_validation(self, name):
+        """An accented name must not cost us the whole frame."""
+        frame = self._hardware_frame("ldi", [["71", name, "3"]])
+        messages = ProtocolDecoder(validate_crc=True).feed(frame)
+        assert len(messages) == 1
+        assert messages[0]["records"][0][1] == name
+
+    def test_corrupted_non_ascii_frame_is_still_rejected(self):
+        """Validation must stay strict, not just permissive."""
+        frame = bytearray(self._hardware_frame("ldi", [["102", "Blínd", "3"]]))
+        frame[6] ^= 0x01
+        assert ProtocolDecoder(validate_crc=True).feed(bytes(frame)) == []
+
+    def test_our_encoder_round_trips_under_validation(self):
+        """encode_message must produce frames our own validator accepts."""
+        raw = encode_message("ldi", ["à"], [["102", "Wíndow Blínd"]])
+        messages = decode_message(raw, validate_crc=True)
+        assert len(messages) == 1
+        assert messages[0]["records"][0][1] == "Wíndow Blínd"

@@ -25,7 +25,9 @@ classifiers = [
     "Topic :: System :: Networking",
 ]
 dependencies = [
-    # ClientWSTimeout (used in client.connect) requires aiohttp >= 3.10
+    # ClientWSTimeout (used in client.connect) arrived in aiohttp 3.10;
+    # 3.11 is pinned because 3.10 deprecated the old float ws timeout
+    # and only 3.11 settled the current signature.
     "aiohttp>=3.11",
 ]
 
@@ -50,12 +52,16 @@ dev = [
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+# the CLI scripts are importable so their shared modules can be tested
+pythonpath = [".", "scripts"]
 
 [tool.setuptools.packages.find]
 include = ["pyavedominaplus*"]
 
 [tool.coverage.run]
 source = ["pyavedominaplus"]
+# Lets a bare `coverage run` work; CI uses pytest-cov instead.
+command_line = "-m pytest tests"
 
 [tool.mypy]
 strict = true

@@ -58,19 +58,45 @@ class ShutterTravelEstimator:
             return self._time_func()
         return time.monotonic()
 
+    def _travel_finished(self) -> bool:
+        """Return True once the current run has had time to hit its limit.
+
+        The hardware normally pushes a terminal state when the motor stops,
+        which re-synchronizes the estimate. That push can be missed, so the
+        estimate settles on its own after enough time has elapsed to cover
+        the remaining distance. A run started from an unknown position needs
+        a full travel time, after which the shutter is at its limit whatever
+        it started from.
+        """
+        if self._direction == 0:
+            return False
+        travel_time = self._open_time if self._direction > 0 else self._close_time
+        if self._start_position is None:
+            needed = travel_time
+        else:
+            target = POSITION_OPEN if self._direction > 0 else POSITION_CLOSED
+            needed = abs(target - self._start_position) / POSITION_OPEN * travel_time
+        return self._time() - self._started_at >= needed
+
     @property
     def is_traveling(self) -> bool:
-        """Return True while the shutter is moving."""
-        return self._direction != 0
+        """Return True while the shutter is moving.
+
+        Goes False once the run has had time to complete, even if the
+        terminal status push never arrived.
+        """
+        return self._direction != 0 and not self._travel_finished()
 
     @property
     def position(self) -> float | None:
         """Return the current position estimate (0-100), if known."""
         if self._direction == 0:
             return self._position
+        if self._travel_finished():
+            return POSITION_OPEN if self._direction > 0 else POSITION_CLOSED
         if self._start_position is None:
-            # Moving from an unknown position stays unknown until a
-            # terminal state synchronizes the estimate.
+            # Moving from an unknown position stays unknown until either a
+            # terminal state or a full travel time synchronizes the estimate.
             return None
         travel_time = self._open_time if self._direction > 0 else self._close_time
         elapsed = self._time() - self._started_at

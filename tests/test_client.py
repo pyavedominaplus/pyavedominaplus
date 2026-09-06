@@ -169,6 +169,7 @@ class TestClientDeviceControl:
 
     async def test_close_shutter(self, client, mock_server):
         """Test closing a shutter (EAI command, status CLOSING=4)."""
+        mock_server.set_shutter_position("102", 1.0)  # start open
         await client.initialize()
         await client.wait_for_initialization(timeout=5.0)
 
@@ -193,6 +194,7 @@ class TestClientDeviceControl:
 
     async def test_stop_shutter_while_closing(self, client, mock_server):
         """Stop shutter while closing re-sends close command, status becomes 5."""
+        mock_server.set_shutter_position("102", 1.0)  # start open
         await client.initialize()
         await client.wait_for_initialization(timeout=5.0)
 
@@ -254,6 +256,7 @@ class TestClientDeviceControl:
     async def test_shutter_transitions_to_closed(self):
         """Shutter transitions from CLOSING to CLOSED after transition time."""
         server = MockDominaServer(shutter_transition_time=0.3)
+        server.set_shutter_position("102", 1.0)  # start open
         await server.start()
         try:
             client = AVEDominaClient(
@@ -2103,7 +2106,7 @@ class TestClientWSF:
     """Tests for WSF record-response handling."""
 
     async def test_wsf_records_populate_statuses(self, client, mock_server):
-        """Default mock mode answers WSF with wsf records; statuses load."""
+        """Default mock mode answers WSF with UPD WS messages; statuses load."""
         mock_server.device_statuses["100"] = 1
         mock_server.device_statuses["102"] = 3
         await client.initialize()
@@ -2112,7 +2115,7 @@ class TestClientWSF:
         assert client.devices["102"].current_value == 3
 
     async def test_wsf_records_fire_device_status_events(self, client, mock_server):
-        """Each wsf record fires a device_status update callback."""
+        """Each reported status fires a device_status update callback."""
         events = []
         client.register_update_callback(lambda t, d: events.append((t, d)))
         await client.initialize()
@@ -2128,9 +2131,9 @@ class TestClientWSF:
         await client._handle_wsf(["1"], [["100"], ["100", "abc"], []])
         assert client.devices["100"].current_value == before
 
-    async def test_wsf_legacy_upd_mode_still_initializes(self):
-        """Servers answering WSF with UPD WS messages still work."""
-        server = MockDominaServer(wsf_legacy_upd=True)
+    async def test_wsf_record_mode_still_initializes(self):
+        """Servers answering WSF with a wsf record message still work."""
+        server = MockDominaServer(wsf_records=True)
         await server.start()
         try:
             c = AVEDominaClient(host="127.0.0.1", port=server.port, command_delay=0)
@@ -2265,3 +2268,192 @@ class TestClientContextManager:
         ) as c:
             assert c.connected
         assert not c.connected
+
+
+class TestInitializationWatchdog:
+    """Initialization must not wedge on devices that never report a status."""
+
+    @staticmethod
+    def _silence_family(server: MockDominaServer, family: str) -> None:
+        """Make the mock server ignore WSF for one device family."""
+        original = server._respond_wsf
+
+        async def patched(ws, parameters):
+            if parameters and parameters[0] == family:
+                return
+            await original(ws, parameters)
+
+        server._respond_wsf = patched
+
+    async def test_init_completes_when_a_device_never_reports(self, mock_server):
+        """A silent device no longer blocks initialization forever."""
+        self._silence_family(mock_server, "16")  # device 107, a shutter
+        c = AVEDominaClient(
+            host="127.0.0.1",
+            port=mock_server.port,
+            command_delay=0,
+            status_settle_timeout=0.5,
+        )
+        await c.connect()
+        try:
+            await c.initialize()
+            assert await c.wait_for_initialization(timeout=5.0)
+            # The devices that did answer are populated...
+            assert c.devices["102"].current_value == 3
+            # ...and the silent one is left at its unknown value.
+            assert c.devices["107"].current_value == 0
+        finally:
+            await c.disconnect()
+
+    async def test_watchdog_waits_while_statuses_keep_arriving(self, mock_server):
+        """The settle timer only fires after status traffic actually stops."""
+        self._silence_family(mock_server, "16")
+        c = AVEDominaClient(
+            host="127.0.0.1",
+            port=mock_server.port,
+            command_delay=0,
+            status_settle_timeout=0.3,
+        )
+        await c.connect()
+        try:
+            await c.initialize()
+            assert await c.wait_for_initialization(timeout=5.0)
+            assert c._status_watchdog_task is None or c._status_watchdog_task.done()
+        finally:
+            await c.disconnect()
+
+    async def test_watchdog_cancelled_once_all_statuses_arrive(self, client):
+        """A fully reporting system completes without the watchdog firing."""
+        await client.initialize()
+        assert await client.wait_for_initialization(timeout=5.0)
+        assert not client._pending_devices
+        assert client._status_watchdog_task is None
+
+    async def test_watchdog_disabled_by_zero_timeout(self, mock_server):
+        """status_settle_timeout=0 restores the strict wait-for-everything mode."""
+        self._silence_family(mock_server, "16")
+        c = AVEDominaClient(
+            host="127.0.0.1",
+            port=mock_server.port,
+            command_delay=0,
+            status_settle_timeout=0,
+        )
+        await c.connect()
+        try:
+            await c.initialize()
+            assert not await c.wait_for_initialization(timeout=1.0)
+        finally:
+            await c.disconnect()
+
+
+class TestDeviceIdentityAcrossReinit:
+    """Device objects must survive a re-read of the device list."""
+
+    async def test_devices_are_updated_in_place(self, client):
+        """Re-running LDI keeps the same DominaDevice objects."""
+        await client.initialize()
+        assert await client.wait_for_initialization(timeout=5.0)
+        before = client.devices["102"]
+        thermo_before = client.thermostats["103"]
+
+        client._ldi_loaded = False
+        await client._handle_ldi([], [["102", "Window Blind", "3", "1;2"]])
+
+        assert client.devices["102"] is before
+        # Devices no longer listed are dropped.
+        assert "100" not in client.devices
+        assert "103" not in client.thermostats
+        assert thermo_before is not None
+
+    async def test_attached_travel_estimator_survives_reinit(self, client):
+        """A travel estimator attached by a consumer is not thrown away."""
+        await client.initialize()
+        assert await client.wait_for_initialization(timeout=5.0)
+        device = client.devices["102"]
+        estimator = device.attach_travel_estimator(20.0, 20.0)
+
+        client._ldi_loaded = False
+        await client._handle_ldi([], [["102", "Window Blind", "3", "1;2"]])
+
+        assert client.devices["102"].travel_estimator is estimator
+
+    async def test_reinit_refreshes_names_and_types(self, client):
+        """Renamed or retyped devices are updated rather than duplicated."""
+        await client.initialize()
+        assert await client.wait_for_initialization(timeout=5.0)
+        before = client.devices["102"]
+
+        client._ldi_loaded = False
+        await client._handle_ldi([], [["102", "Renamed Blind", "16", "3"]])
+
+        assert client.devices["102"] is before
+        assert before.name == "Renamed Blind"
+        assert before.device_type == 16
+
+
+class TestReconnectTaskOwnership:
+    """The reconnect task reference must stay cancellable by disconnect()."""
+
+    async def test_reconnect_does_not_clobber_a_newer_task(self, mock_server):
+        """A socket that dies during initialize() registers a new task.
+
+        The finishing reconnect must not null out that newer reference, or
+        disconnect() loses its handle on a task that will re-open the
+        connection after shutdown.
+        """
+        client = AVEDominaClient(
+            host="127.0.0.1",
+            port=mock_server.port,
+            command_delay=0,
+            reconnect_interval=0.01,
+        )
+        await client.connect()
+        newer = asyncio.ensure_future(asyncio.sleep(3600))
+        original_initialize = client.initialize
+
+        async def initialize_then_lose_the_socket():
+            # what _listen_loop's finally block does on a second drop
+            client._reconnect_task = newer
+            await original_initialize()
+
+        client.initialize = initialize_then_lose_the_socket
+        try:
+            await client._reconnect_loop()
+            assert client._reconnect_task is newer
+        finally:
+            client.initialize = original_initialize
+            await client.disconnect()
+        # disconnect() could reach it, so it is not left running
+        assert newer.cancelled() or newer.done()
+
+    async def test_own_task_reference_is_cleared_on_success(self, mock_server):
+        """A clean reconnect still clears its own reference.
+
+        Set up the real precondition: the listen loop has already exited
+        (that is what spawns a reconnect), so nothing else registers a
+        task while this one runs.
+        """
+        client = AVEDominaClient(
+            host="127.0.0.1",
+            port=mock_server.port,
+            command_delay=0,
+            reconnect_interval=0.01,
+        )
+        await client.connect()
+        assert client._listen_task is not None
+        client._listen_task.cancel()
+        try:
+            await client._listen_task
+        except asyncio.CancelledError:
+            pass
+        client._listen_task = None
+        if client._ws and not client._ws.closed:
+            await client._ws.close()
+        client._ws = None
+        try:
+            task = asyncio.ensure_future(client._reconnect_loop())
+            client._reconnect_task = task
+            await task
+            assert client._reconnect_task is None
+        finally:
+            await client.disconnect()

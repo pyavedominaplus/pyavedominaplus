@@ -43,7 +43,11 @@ from .exceptions import (
     AVEDominaError,
     AVEDominaTimeoutError,
 )
-from .measure import ShutterTravelMeasurement, measure_shutter_travel_times
+from .measure import (
+    DEFAULT_PHASE_TIMEOUT,
+    ShutterTravelMeasurement,
+    measure_shutter_travel_times,
+)
 from .models import (
     DominaArea,
     DominaDevice,
@@ -70,6 +74,7 @@ __all__ = [
     "ProtocolDecoder",
     "ShutterTravelEstimator",
     "ShutterTravelMeasurement",
+    "DEFAULT_PHASE_TIMEOUT",
     "UpdateCallback",
     "build_crc",
     "decode_message",

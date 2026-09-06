@@ -155,6 +155,31 @@ local shutter_statuses = {
     ["5"] = "Stopped",
 }
 
+-- UPD parameter layout. WS and WT carry a discriminator in params[2]
+-- (device family / WT sub-type), so their device id is params[3] and the
+-- value params[4]. Every other subtype observed on real hardware is
+-- <sub>, <id>, <value>... with the id in params[2]. Verified against the
+-- captures in this repo: WS n=230 and WT n=202 are 4-param; TP, TM, TT,
+-- TL, TK, TLO, TS, TO, TR, L and D are all 3-param.
+local upd_id_at_3 = {
+    ["WS"] = true,
+    ["WT"] = true,
+}
+
+-- Subtypes that carry no device id at all.
+local upd_no_device = {
+    ["MS"] = true,
+    ["X"]  = true,
+}
+
+-- upd D reports the icon for a MAP COMMAND, not for a device. Confirmed on
+-- real traffic: the map command pointing at a shutter receives one icon
+-- update per status change of that shutter, while the shutter's own device
+-- id receives almost none. Icon numbering is per device family - shutters
+-- sit around 184 (185 open, 186 closed, 187 opening, 188 closing), lights
+-- 147, dimmers 132 - and a D message does not say which family it belongs
+-- to, so the raw icon id is shown rather than a guessed label.
+
 -- Light/dimmer on/off helper
 local function light_status(val)
     local n = tonumber(val)
@@ -243,8 +268,12 @@ local function build_info(command, params, records)
             local sub = params[1]
             local sub_desc = upd_names[sub] or sub
             info = info .. " " .. sub_desc
-            if #params >= 3 then
-                info = info .. " dev=" .. params[3]
+            local id_idx = upd_id_at_3[sub] and 3 or 2
+            local val_idx = id_idx + 1
+            if not upd_no_device[sub] and #params >= id_idx then
+                -- D identifies a map command; everything else a device
+                local id_label = (sub == "D") and " cmd=" or " dev="
+                info = info .. id_label .. params[id_idx]
             end
             if sub == "WS" and #params >= 4 then
                 -- Device status: decode based on device type
@@ -275,26 +304,32 @@ local function build_info(command, params, records)
                 else
                     info = info .. " " .. wt_name .. "=" .. params[4]
                 end
-            elseif sub == "TP" and #params >= 4 then
-                info = info .. " setpoint=" .. fmt_temp(params[4])
-            elseif sub == "TM" and #params >= 4 then
-                info = info .. " " .. (thermo_modes[params[4]] or ("mode=" .. params[4]))
-            elseif sub == "TS" and #params >= 4 then
-                info = info .. " " .. (thermo_seasons[params[4]] or ("season=" .. params[4]))
-            elseif sub == "TLO" and #params >= 4 then
-                info = info .. " " .. (thermo_local_off[params[4]] or ("local_off=" .. params[4]))
-            elseif sub == "TT" and #params >= 4 then
-                info = info .. " temp=" .. fmt_temp(params[4])
-            elseif sub == "TO" and #params >= 4 then
-                info = info .. " offset=" .. fmt_temp(params[4])
-            elseif sub == "TL" and #params >= 4 then
-                info = info .. " fan=" .. params[4]
-            elseif sub == "TK" and #params >= 4 then
-                info = info .. " " .. (thermo_keylock[params[4]] or ("lock=" .. params[4]))
-            elseif sub == "UMI" and #params >= 4 then
-                info = info .. " humidity=" .. params[4] .. "%"
-            elseif #params >= 4 then
-                info = info .. " val=" .. params[4]
+            elseif sub == "TP" and #params >= val_idx then
+                info = info .. " setpoint=" .. fmt_temp(params[val_idx])
+            elseif sub == "TM" and #params >= val_idx then
+                info = info .. " " .. (thermo_modes[params[val_idx]]
+                    or ("mode=" .. params[val_idx]))
+            elseif sub == "TS" and #params >= val_idx then
+                info = info .. " " .. (thermo_seasons[params[val_idx]]
+                    or ("season=" .. params[val_idx]))
+            elseif sub == "TLO" and #params >= val_idx then
+                info = info .. " " .. (thermo_local_off[params[val_idx]]
+                    or ("local_off=" .. params[val_idx]))
+            elseif sub == "TT" and #params >= val_idx then
+                info = info .. " temp=" .. fmt_temp(params[val_idx])
+            elseif sub == "TO" and #params >= val_idx then
+                info = info .. " offset=" .. fmt_temp(params[val_idx])
+            elseif sub == "TL" and #params >= val_idx then
+                info = info .. " fan=" .. params[val_idx]
+            elseif sub == "TK" and #params >= val_idx then
+                info = info .. " " .. (thermo_keylock[params[val_idx]]
+                    or ("lock=" .. params[val_idx]))
+            elseif sub == "UMI" and #params >= val_idx then
+                info = info .. " humidity=" .. params[val_idx] .. "%"
+            elseif sub == "D" and #params >= val_idx then
+                info = info .. " icon=" .. params[val_idx]
+            elseif #params >= val_idx then
+                info = info .. " val=" .. params[val_idx]
             end
         end
     elseif command == "EBI" then
@@ -481,6 +516,11 @@ local function parse_message(tvb, offset, len, tree, pinfo, msg_num)
             elseif command == "SIL" then
                 if i == 1 then label = "Device ID: " .. p end
             elseif command == "WSF" or command == "wsf" then
+                -- Note: no capture in this repo contains a lowercase "wsf"
+                -- record response. Real hardware answers WSF with a stream
+                -- of individual "upd WS <family> <id> <status>" messages
+                -- (122 of them across the captures, 0 wsf). The wsf branch
+                -- is kept for firmware that does reply that way.
                 if i == 1 then
                     label = "Family: " .. (device_types[p] or p)
                 end
@@ -492,12 +532,17 @@ local function parse_message(tvb, offset, len, tree, pinfo, msg_num)
                         label = "Device Type: " .. (device_types[p] or p)
                     elseif sub == "WT" then
                         label = "Sub-type: " .. (wt_subtypes[p] or p)
+                    elseif sub == "D" then
+                        label = "Map Command ID: " .. p
+                    elseif upd_no_device[sub] then
+                        label = "Value: " .. p
                     else
                         label = "Device ID: " .. p
                     end
                 elseif i == 3 then
                     if sub == "WS" then label = "Device ID: " .. p
                     elseif sub == "WT" then label = "Device ID: " .. p
+                    elseif sub == "D" then label = "Icon: " .. p
                     else label = "Value: " .. p end
                 elseif i == 4 then
                     if sub == "WS" then

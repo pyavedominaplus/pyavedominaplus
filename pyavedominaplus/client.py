@@ -106,6 +106,7 @@ class AVEDominaClient:
         max_reconnect_interval: float = 300.0,
         command_delay: float = 0.3,
         connect_timeout: float = 10.0,
+        status_settle_timeout: float = 10.0,
     ) -> None:
         self.host = host
         self.port = port
@@ -120,6 +121,7 @@ class AVEDominaClient:
         self._max_reconnect_interval = max_reconnect_interval
         self._command_delay = command_delay
         self._connect_timeout = connect_timeout
+        self._status_settle_timeout = status_settle_timeout
         self._devices: dict[str, DominaDevice] = {}
         self._thermostats: dict[str, DominaThermostat] = {}
         self._areas: dict[str, DominaArea] = {}
@@ -133,6 +135,7 @@ class AVEDominaClient:
         self._lmc_pending_areas: set[str] = set()
         self._statuses_requested = False
         self._pending_devices: set[str] = set()
+        self._status_watchdog_task: asyncio.Task[None] | None = None
 
     @property
     def url(self) -> str:
@@ -234,6 +237,7 @@ class AVEDominaClient:
         _LOGGER.debug("Disconnecting from %s", self.url)
         self._running = False
         self._connected_event.clear()
+        self._cancel_status_watchdog()
         if self._reconnect_task and not self._reconnect_task.done():
             self._reconnect_task.cancel()
             try:
@@ -268,6 +272,7 @@ class AVEDominaClient:
 
     def _reset_init_state(self) -> None:
         """Reset initialization flags so initialize() works after reconnect."""
+        self._cancel_status_watchdog()
         self._initialized.clear()
         self._decoder.reset()
         self._lm_loaded = False
@@ -310,7 +315,13 @@ class AVEDominaClient:
                 self._notify_connection(CONN_STATUS_OPEN)
                 self._listen_task = asyncio.ensure_future(self._listen_loop())
                 await self.initialize()
-                self._reconnect_task = None
+                # The socket can die again during initialize(), in which case
+                # the listen loop has already registered a newer reconnect
+                # task. Only clear the reference if it is still ours, or that
+                # newer task becomes unreachable and disconnect() cannot
+                # cancel it.
+                if self._reconnect_task is asyncio.current_task():
+                    self._reconnect_task = None
                 return
             except asyncio.CancelledError:
                 return
@@ -681,15 +692,63 @@ class AVEDominaClient:
         # If no devices to track, mark initialized now
         if not self._pending_devices:
             self._initialized.set()
+        else:
+            self._start_status_watchdog()
+
+    def _start_status_watchdog(self) -> None:
+        """Start the watchdog that completes init despite silent devices."""
+        self._cancel_status_watchdog()
+        if self._status_settle_timeout > 0:
+            self._status_watchdog_task = asyncio.ensure_future(self._status_watchdog())
+
+    def _cancel_status_watchdog(self) -> None:
+        """Cancel a running status watchdog, if any."""
+        if self._status_watchdog_task and not self._status_watchdog_task.done():
+            self._status_watchdog_task.cancel()
+        self._status_watchdog_task = None
+
+    async def _status_watchdog(self) -> None:
+        """Complete initialization when device statuses stop arriving.
+
+        Some devices never answer WSF (unconfigured addresses, families the
+        server does not report). Waiting for every device forever would wedge
+        the client, so initialization also completes once no new status has
+        arrived for status_settle_timeout seconds. The devices still missing
+        keep current_value 0 and are logged.
+        """
+        try:
+            while True:
+                remaining = len(self._pending_devices)
+                await asyncio.sleep(self._status_settle_timeout)
+                if self._initialized.is_set() or not self._pending_devices:
+                    return
+                if len(self._pending_devices) == remaining:
+                    _LOGGER.warning(
+                        "No device status received for %.1fs; completing "
+                        "initialization with %d device(s) still unknown: %s",
+                        self._status_settle_timeout,
+                        remaining,
+                        ", ".join(sorted(self._pending_devices)),
+                    )
+                    self._initialized.set()
+                    return
+        except asyncio.CancelledError:
+            raise
 
     async def _handle_ldi(
         self, parameters: list[str], records: list[list[str]]
     ) -> None:
-        """Handle LDI (list devices) response."""
+        """Handle LDI (list devices) response.
+
+        Existing DominaDevice/DominaThermostat objects are updated in place
+        rather than replaced, so references held by callers (and any attached
+        travel estimator) survive a reconnect. Devices that disappeared from
+        the server's list are dropped.
+        """
         if self._ldi_loaded:
             return
-        self._devices.clear()
-        self._thermostats.clear()
+        seen_devices: set[str] = set()
+        seen_thermostats: set[str] = set()
         for record in records:
             if len(record) < 3:
                 continue
@@ -715,24 +774,42 @@ class AVEDominaClient:
             if is_vmc_daikin:
                 device_id = str(int(device_id) - 10000000)
 
-            device = DominaDevice(
-                id=device_id,
-                name=device_name,
-                device_type=device_type,
-                maps=device_maps,
-            )
-            self._devices[device_id] = device
+            device = self._devices.get(device_id)
+            if device is None:
+                device = DominaDevice(
+                    id=device_id,
+                    name=device_name,
+                    device_type=device_type,
+                    maps=device_maps,
+                )
+                self._devices[device_id] = device
+            else:
+                device.name = device_name
+                device.device_type = device_type
+                device.maps = device_maps
+            seen_devices.add(device_id)
 
             # Create thermostat tracking object
             if device_type == DEVICE_TYPE_THERMOSTAT:
-                thermo = DominaThermostat(
-                    id=device_id,
-                    name=device_name,
-                    is_vmc_daikin=is_vmc_daikin,
-                )
-                self._thermostats[device_id] = thermo
+                thermo = self._thermostats.get(device_id)
+                if thermo is None:
+                    thermo = DominaThermostat(
+                        id=device_id,
+                        name=device_name,
+                        is_vmc_daikin=is_vmc_daikin,
+                    )
+                    self._thermostats[device_id] = thermo
+                else:
+                    thermo.name = device_name
+                    thermo.is_vmc_daikin = is_vmc_daikin
+                seen_thermostats.add(device_id)
                 # Request thermostat status
                 await self.send_command(CMD_GET_THERMOSTAT_STATUS, [device_id], [[""]])
+
+        for stale in set(self._devices) - seen_devices:
+            del self._devices[stale]
+        for stale in set(self._thermostats) - seen_thermostats:
+            del self._thermostats[stale]
 
         self._ldi_loaded = True
         # Track devices that will receive status updates.
@@ -1078,9 +1155,14 @@ class AVEDominaClient:
     ) -> None:
         """Handle WSF (device statuses by family) response.
 
-        Real hardware answers WSF with a wsf message whose records are
-        [device_id, status] pairs for every device of the requested
-        family (parameters[0]).
+        Records are [device_id, status] pairs for every device of the
+        requested family (parameters[0]).
+
+        Note: every capture in this repo shows the hardware answering WSF
+        with a stream of individual `upd WS family id status` messages, not
+        with a wsf record message. This handler covers the record form the
+        Wireshark dissector documents; the UPD WS path is the one real
+        hardware exercises.
         """
         try:
             device_type = int(parameters[0]) if parameters else 0
@@ -1119,6 +1201,7 @@ class AVEDominaClient:
             and not self._pending_devices
             and not self._initialized.is_set()
         ):
+            self._cancel_status_watchdog()
             self._initialized.set()
 
     async def _handle_ping(

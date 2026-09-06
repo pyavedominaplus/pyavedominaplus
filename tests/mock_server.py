@@ -1,6 +1,7 @@
 """Mock AVE DominaPlus WebSocket server for testing."""
 
 import asyncio
+import time
 
 from aiohttp import web, WSMsgType
 
@@ -196,15 +197,18 @@ MOCK_DEVICE_ADDRESSES = [
 ]
 
 # Device statuses: device_id -> current value
+# Shutters report 1/2/3/4/5 only; 3 (closed) is what real hardware reports
+# for an idle shutter (see test_real_app_initialization.pcap, where all 13
+# shutters answer WSF family 3 with status 3).
 _device_statuses: dict[str, int] = {
     "100": 0,
     "101": 0,
-    "102": 0,
+    "102": 3,
     "103": 0,
     "104": 0,
     "105": 1,
     "106": 0,
-    "107": 0,
+    "107": 3,
     "108": 0,
 }
 
@@ -221,15 +225,16 @@ class MockDominaServer:
         host: str = "127.0.0.1",
         port: int = 0,
         shutter_transition_time: float = 60.0,
-        wsf_legacy_upd: bool = False,
+        wsf_records: bool = False,
         sts_echo: bool = True,
     ) -> None:
         self.host = host
         self.port = port
         self.shutter_transition_time = shutter_transition_time
-        # Real hardware answers WSF with a wsf record message; set
-        # wsf_legacy_upd to emulate servers that answer with UPD WS instead.
-        self.wsf_legacy_upd = wsf_legacy_upd
+        # Every capture in this repo shows real hardware answering WSF with
+        # individual UPD WS messages, so that is the default. Set wsf_records
+        # to emulate the wsf record response the dissector documents.
+        self.wsf_records = wsf_records
         # Real hardware does not reliably echo TP/TM/WT S after STS;
         # set sts_echo=False to emulate that.
         self.sts_echo = sts_echo
@@ -242,6 +247,12 @@ class MockDominaServer:
         self.thermostat_local_off: dict[str, int] = {"103": 0}
         self.received_commands: list[dict] = []
         self._shutter_tasks: dict[str, asyncio.Task] = {}
+        # Fractional shutter travel, 0.0 = closed, 1.0 = open. Tracked so a
+        # run resumed from a partial position takes only the time the
+        # remaining distance needs, the way real hardware behaves.
+        self.shutter_positions: dict[str, float] = {}
+        # device_id -> (started_at, start_position, target_position)
+        self._shutter_moves: dict[str, tuple[float, float, float]] = {}
 
     async def start(self) -> int:
         """Start the mock server and return the assigned port."""
@@ -411,13 +422,13 @@ class MockDominaServer:
     ) -> None:
         """Send device statuses for a given family.
 
-        Real hardware answers with a wsf message whose records are
-        [device_id, status] pairs; the legacy mode sends individual
-        UPD WS messages instead.
+        Real hardware answers with individual UPD WS messages; the
+        wsf_records mode answers with a single wsf message whose records
+        are [device_id, status] pairs instead.
         """
         family = parameters[0] if parameters else "1"
         family_int = int(family)
-        if self.wsf_legacy_upd:
+        if not self.wsf_records:
             # Send UPD WS for each device of this family
             for device in MOCK_DEVICES:
                 device_type = int(device[2])
@@ -489,6 +500,47 @@ class MockDominaServer:
         await ws.send_bytes(resp)
         await self._send_upd_ws(device_id, new_value)
 
+    def _shutter_position(self, device_id: str) -> float:
+        """Return the tracked travel fraction, deriving it from status if new.
+
+        Tests set device_statuses directly, so a device with no tracked
+        position falls back to what its status implies.
+        """
+        if device_id in self.shutter_positions:
+            return self.shutter_positions[device_id]
+        status = self.device_statuses.get(device_id, 0)
+        return {1: 1.0, 3: 0.0}.get(status, 0.5)
+
+    def set_shutter_position(self, device_id: str, fraction: float) -> None:
+        """Place a shutter at a travel fraction (0.0 closed, 1.0 open).
+
+        Also sets the reported status to match, so a test can start a run
+        from a position that actually has somewhere left to travel.
+        """
+        fraction = max(0.0, min(1.0, fraction))
+        self.shutter_positions[device_id] = fraction
+        if fraction >= 1.0:
+            status = 1  # OPEN
+        elif fraction <= 0.0:
+            status = 3  # CLOSED
+        else:
+            status = 5  # STOPPED mid-travel
+        self.device_statuses[device_id] = status
+        self._shutter_moves.pop(device_id, None)
+
+    def _settle_shutter_position(self, device_id: str) -> None:
+        """Freeze the travel fraction of a run that is being interrupted."""
+        move = self._shutter_moves.pop(device_id, None)
+        if move is None:
+            return
+        started, start_pos, target = move
+        duration = abs(target - start_pos) * self.shutter_transition_time
+        if duration <= 0:
+            self.shutter_positions[device_id] = target
+            return
+        fraction = min(1.0, (time.monotonic() - started) / duration)
+        self.shutter_positions[device_id] = start_pos + (target - start_pos) * fraction
+
     async def _process_eai(
         self, ws: web.WebSocketResponse, parameters: list[str]
     ) -> None:
@@ -497,12 +549,27 @@ class MockDominaServer:
         Simulates real hardware behavior:
         - Open/close starts the motor (OPENING=2 / CLOSING=4)
         - Re-sending the same direction while moving stops (STOPPED=5)
-        - After shutter_transition_time, transitions to final state (OPEN=1 / CLOSED=3)
+        - The run takes shutter_transition_time scaled by the distance left
+          to travel, then reports the final state (OPEN=1 / CLOSED=3)
         """
         if len(parameters) < 2:
             return
         device_id = parameters[0]
         sub_cmd = parameters[1]
+        resp = encode_message("ack", ["EAI"])
+        await ws.send_bytes(resp)
+        await self.apply_shutter_command(device_id, sub_cmd)
+
+    async def press_wall_switch(self, device_id: str, sub_cmd: str) -> None:
+        """Move a shutter as if someone pressed the physical wall switch.
+
+        Same effect as an EAI command ("8" up, "9" down) but server
+        initiated: clients only find out from the pushed status update.
+        """
+        await self.apply_shutter_command(device_id, sub_cmd)
+
+    async def apply_shutter_command(self, device_id: str, sub_cmd: str) -> None:
+        """Apply an open/close/stop to a shutter and push the new status."""
         current = self.device_statuses.get(device_id, 0)
         if sub_cmd == "8":
             if current == 2:
@@ -522,23 +589,40 @@ class MockDominaServer:
         if device_id in self._shutter_tasks:
             self._shutter_tasks[device_id].cancel()
             del self._shutter_tasks[device_id]
+        self._settle_shutter_position(device_id)
+        # Resolve the start position while device_statuses still holds the
+        # pre-command status: the fallback derives from it.
+        start = self._shutter_position(device_id)
+        self.shutter_positions[device_id] = start
         self.device_statuses[device_id] = new_value
-        resp = encode_message("ack", ["EAI"])
-        await ws.send_bytes(resp)
         await self._send_upd_ws(device_id, new_value)
         # Schedule transition to final state if shutter is moving
         if new_value in (2, 4):
             final_value = 1 if new_value == 2 else 3  # OPEN or CLOSED
+            target = 1.0 if new_value == 2 else 0.0
+            duration = abs(target - start) * self.shutter_transition_time
+            self._shutter_moves[device_id] = (time.monotonic(), start, target)
             self._shutter_tasks[device_id] = asyncio.ensure_future(
-                self._shutter_transition(device_id, final_value)
+                self._shutter_transition(device_id, final_value, duration, target)
             )
 
-    async def _shutter_transition(self, device_id: str, final_value: int) -> None:
-        """After a delay, transition shutter from moving to final state."""
+    async def _shutter_transition(
+        self,
+        device_id: str,
+        final_value: int,
+        duration: float | None = None,
+        target: float | None = None,
+    ) -> None:
+        """After the travel time, move the shutter to its final state."""
+        if duration is None:
+            duration = self.shutter_transition_time
         try:
-            await asyncio.sleep(self.shutter_transition_time)
+            await asyncio.sleep(duration)
         except asyncio.CancelledError:
             return
+        self._shutter_moves.pop(device_id, None)
+        if target is not None:
+            self.shutter_positions[device_id] = target
         self.device_statuses[device_id] = final_value
         await self._send_upd_ws(device_id, final_value)
 

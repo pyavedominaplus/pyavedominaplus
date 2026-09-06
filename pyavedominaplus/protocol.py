@@ -8,14 +8,20 @@ from .const import STX, ETX, EOT, GS, RS
 _LOGGER = logging.getLogger(__name__)
 
 
-def build_crc(data: str) -> str:
+def build_crc(data: str | bytes) -> str:
     """Calculate the CRC for a DominaPlus message.
 
     XOR all bytes, subtract from 0xFF, return as 2-char hex string.
+
+    The hardware checksums the UTF-8 bytes on the wire, so a str is
+    encoded first: XORing codepoints instead would disagree for any
+    non-ASCII character (an accented device name, say) and reject a
+    perfectly good frame.
     """
+    payload = data.encode("utf-8") if isinstance(data, str) else data
     crc = 0
-    for ch in data:
-        crc ^= ord(ch)
+    for byte in payload:
+        crc ^= byte
     crc = 0xFF - crc
     return f"{crc:02X}"
 
@@ -42,33 +48,53 @@ def encode_message(
             msg += chr(RS) + chr(GS).join(record)
 
     msg += chr(ETX)
-    crc = build_crc(msg)
-    msg += crc + chr(EOT)
-    return msg.encode("utf-8")
+    payload = msg.encode("utf-8")
+    return payload + build_crc(payload).encode("ascii") + bytes([EOT])
 
 
-def _decode_part(part: str, validate_crc: bool) -> dict[str, Any] | None:
+def _to_text(frame: bytes) -> str:
+    """Decode a raw frame, falling back to latin-1 for invalid UTF-8."""
+    try:
+        return frame.decode("utf-8")
+    except UnicodeDecodeError:
+        return frame.decode("latin-1")
+
+
+def _crc_ok(frame: bytes) -> bool:
+    """Check the 2-char CRC following ETX in a raw frame (EOT stripped).
+
+    Validated on the raw bytes rather than decoded text, so that a frame
+    carrying non-ASCII names checksums the way the hardware computed it.
+    Frames that are not STX-framed, or that carry no trailing CRC, are
+    tolerated rather than rejected.
+    """
+    if not frame or frame[0] != STX:
+        return True
+    etx_pos = frame.find(bytes([ETX]))
+    if etx_pos < 0:
+        return True
+    received = frame[etx_pos + 1 : etx_pos + 3]
+    if len(received) != 2:
+        return True
+    expected = build_crc(frame[: etx_pos + 1])
+    if received.upper().decode("latin-1") == expected:
+        return True
+    _LOGGER.warning(
+        "Dropping frame with bad CRC (got %s, expected %s): %r",
+        received.decode("latin-1"),
+        expected,
+        frame,
+    )
+    return False
+
+
+def _decode_part(part: str) -> dict[str, Any] | None:
     """Decode a single STX..ETX+CRC message (EOT already stripped)."""
     if not part or len(part) < 3:
         return None
 
     # Format: STX + payload + ETX + CRC(2 chars)
     etx_pos = part.find(chr(ETX))
-    if validate_crc and ord(part[0]) == STX and etx_pos >= 0:
-        # CRC is computed over STX + payload + ETX; the 2 chars after
-        # ETX carry it. Frames without a trailing CRC are tolerated.
-        received_crc = part[etx_pos + 1 : etx_pos + 3]
-        if len(received_crc) == 2:
-            expected_crc = build_crc(part[: etx_pos + 1])
-            if received_crc.upper() != expected_crc:
-                _LOGGER.warning(
-                    "Dropping frame with bad CRC (got %s, expected %s): %r",
-                    received_crc,
-                    expected_crc,
-                    part,
-                )
-                return None
-
     if ord(part[0]) == STX:
         part = part[1:]
         etx_pos = part.find(chr(ETX))
@@ -104,15 +130,13 @@ def decode_message(raw: bytes, validate_crc: bool = False) -> list[dict[str, Any
     Assumes ``raw`` contains only complete messages. For a stream that may
     split messages across frames, use ``ProtocolDecoder`` instead.
     """
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError:
-        text = "".join(chr(b) for b in raw)
-
     messages = []
-    # Split on EOT to handle multiple messages in one frame
-    for part in text.split(chr(EOT)):
-        msg = _decode_part(part, validate_crc)
+    # Split on EOT to handle multiple messages in one frame. Splitting in
+    # byte space keeps the CRC check on the bytes the hardware hashed.
+    for frame in raw.split(bytes([EOT])):
+        if validate_crc and not _crc_ok(frame):
+            continue
+        msg = _decode_part(_to_text(frame))
         if msg is not None:
             messages.append(msg)
 
@@ -151,11 +175,9 @@ class ProtocolDecoder:
                 break
             frame = buf[:eot_pos]
             buf = buf[eot_pos + 1 :]
-            try:
-                text = frame.decode("utf-8")
-            except UnicodeDecodeError:
-                text = "".join(chr(b) for b in frame)
-            msg = _decode_part(text, self._validate_crc)
+            if self._validate_crc and not _crc_ok(frame):
+                continue
+            msg = _decode_part(_to_text(frame))
             if msg is not None:
                 messages.append(msg)
         self._buffer = buf
