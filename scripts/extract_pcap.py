@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from scapy.all import PcapReader, IP, TCP
+    from scapy.all import IP, TCP, PcapReader
 except ImportError:
     print("Error: scapy is required. Install with: pip install scapy")
     sys.exit(1)
@@ -138,7 +138,8 @@ class PCAPExtractor:
                         msg.get("command"),
                         msg.get("parameters", [])[:3],
                     )
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
+                # One malformed frame must not stop the whole scan.
                 _LOGGER.warning("Failed to decode message: %s", e)
 
         self.ave_buffers[flow_key] = buf
@@ -170,7 +171,7 @@ class PCAPExtractor:
                 tcp_buf = tcp_buf[end + 4 :]
                 if not tcp_buf:
                     return
-            elif tcp_buf.startswith(b"GET ") or tcp_buf.startswith(b"HTTP/"):
+            elif tcp_buf.startswith((b"GET ", b"HTTP/")):
                 # HTTP handshake in progress, buffer it
                 self.stream_buffers[flow_key] = tcp_buf
                 return
@@ -242,8 +243,9 @@ class PCAPExtractor:
         except FileNotFoundError:
             _LOGGER.error("Could not open PCAP file: %s", pcap_file)
             return 0
-        except Exception as e:
-            _LOGGER.error("Error reading PCAP file: %s", e)
+        except Exception:
+            # Any malformed capture is reported, not raised: this is a CLI.
+            _LOGGER.exception("Error reading PCAP file")
             return 0
 
         return len(self.messages)

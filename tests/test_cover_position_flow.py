@@ -6,12 +6,12 @@ whole thing runs against the mock server without a human.
 
 import asyncio
 
+import measure_covers
 import pytest
 import pytest_asyncio
-
-import measure_covers
 import test_cover_position
 from shutter_config import TravelTimeConfig
+
 from tests.mock_server import MockDominaServer
 
 CLOSED, OPEN, STOPPED = 3, 1, 5

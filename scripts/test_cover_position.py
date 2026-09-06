@@ -28,8 +28,11 @@ import asyncio
 import logging
 import sys
 import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
+
+from shutter_config import DEFAULT_CONFIG_PATH, ConfigError, TravelTimeConfig
 
 from pyavedominaplus import (
     DEFAULT_PHASE_TIMEOUT,
@@ -45,7 +48,6 @@ from pyavedominaplus.const import (
     SHUTTER_STATUS_STOPPED,
 )
 from pyavedominaplus.travel import ShutterTravelEstimator
-from shutter_config import DEFAULT_CONFIG_PATH, ConfigError, TravelTimeConfig
 
 #: Reads a line from the user. Injected so the loop can be tested.
 Prompt = Callable[[str], Awaitable[str]]

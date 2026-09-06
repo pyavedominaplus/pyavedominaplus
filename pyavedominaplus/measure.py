@@ -7,9 +7,11 @@ ShutterTravelEstimator.
 """
 
 import asyncio
-from dataclasses import dataclass
+import logging
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
 from .client import AVEDominaClient
 from .const import (
@@ -20,6 +22,8 @@ from .const import (
     SHUTTER_STATUS_OPENING,
     SHUTTER_STATUS_STOPPED,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 DEFAULT_PHASE_TIMEOUT = 180.0
 
@@ -132,10 +136,17 @@ async def measure_shutter_travel_times(
             close_time = await _wait_for(SHUTTER_STATUS_CLOSED) - closing_started
         except TimeoutError:
             # Do not leave the motor running when giving up on a phase.
+            # Nothing may escape here: it would mask the TimeoutError that
+            # tells the caller which phase actually stalled.
             try:
                 await client.stop_shutter(device_id)
-            except Exception:  # pragma: no cover - best effort cleanup
-                pass
+            except Exception:
+                _LOGGER.warning(
+                    "Could not stop shutter %s after a phase timeout; it may "
+                    "still be moving",
+                    device_id,
+                    exc_info=True,
+                )
             raise
     finally:
         unregister()

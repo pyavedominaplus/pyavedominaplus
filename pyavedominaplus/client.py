@@ -2,7 +2,8 @@
 
 import asyncio
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any, Self
 
 import aiohttp
 
@@ -14,8 +15,8 @@ from .const import (
     CMD_GET_THERMOSTAT_MODE,
     CMD_GET_THERMOSTAT_STATUS,
     CMD_LIGHT_COMMAND,
-    CMD_LIST_DEVICES,
     CMD_LIST_DEVICE_ADDRESSES,
+    CMD_LIST_DEVICES,
     CMD_LIST_MAP_COMMANDS,
     CMD_LIST_MAP_LABELS,
     CMD_LIST_MAPS,
@@ -67,15 +68,15 @@ from .const import (
     UPD_RGB,
     UPD_THERMOSTAT,
     UPD_THERMOSTAT_FANLEVEL_MAP,
+    UPD_THERMOSTAT_FUNCTION,
     UPD_THERMOSTAT_KEYBOARD_LOCK,
     UPD_THERMOSTAT_LOCAL_OFF_MAP,
     UPD_THERMOSTAT_MODE,
     UPD_THERMOSTAT_OFFSET_MAP,
+    UPD_THERMOSTAT_REQUEST,
     UPD_THERMOSTAT_SEASON_MAP,
     UPD_THERMOSTAT_SETPOINT,
     UPD_THERMOSTAT_TEMP_MAP,
-    UPD_THERMOSTAT_FUNCTION,
-    UPD_THERMOSTAT_REQUEST,
     UPD_THERMOSTAT_WINDOW,
 )
 from .exceptions import AVEDominaConnectionError, AVEDominaTimeoutError
@@ -261,7 +262,7 @@ class AVEDominaClient:
         _LOGGER.debug("Disconnected")
         self._notify_connection(CONN_STATUS_CLOSE)
 
-    async def __aenter__(self) -> "AVEDominaClient":
+    async def __aenter__(self) -> Self:
         """Connect on entering an async context."""
         await self.connect()
         return self
@@ -716,24 +717,21 @@ class AVEDominaClient:
         arrived for status_settle_timeout seconds. The devices still missing
         keep current_value 0 and are logged.
         """
-        try:
-            while True:
-                remaining = len(self._pending_devices)
-                await asyncio.sleep(self._status_settle_timeout)
-                if self._initialized.is_set() or not self._pending_devices:
-                    return
-                if len(self._pending_devices) == remaining:
-                    _LOGGER.warning(
-                        "No device status received for %.1fs; completing "
-                        "initialization with %d device(s) still unknown: %s",
-                        self._status_settle_timeout,
-                        remaining,
-                        ", ".join(sorted(self._pending_devices)),
-                    )
-                    self._initialized.set()
-                    return
-        except asyncio.CancelledError:
-            raise
+        while True:
+            remaining = len(self._pending_devices)
+            await asyncio.sleep(self._status_settle_timeout)
+            if self._initialized.is_set() or not self._pending_devices:
+                return
+            if len(self._pending_devices) == remaining:
+                _LOGGER.warning(
+                    "No device status received for %.1fs; completing "
+                    "initialization with %d device(s) still unknown: %s",
+                    self._status_settle_timeout,
+                    remaining,
+                    ", ".join(sorted(self._pending_devices)),
+                )
+                self._initialized.set()
+                return
 
     async def _handle_ldi(
         self, parameters: list[str], records: list[list[str]]
@@ -1214,30 +1212,26 @@ class AVEDominaClient:
         self, parameters: list[str], records: list[list[str]]
     ) -> None:
         """Handle ACK - no operation needed."""
-        pass
 
     async def _handle_lml(
         self, parameters: list[str], records: list[list[str]]
     ) -> None:
         """Handle LML (list map labels) response - no action needed."""
-        pass
 
     async def _handle_gsf(
         self, parameters: list[str], records: list[list[str]]
     ) -> None:
         """Handle GSF (get sensor family) response."""
-        pass
 
     async def _handle_net(
         self, parameters: list[str], records: list[list[str]]
     ) -> None:
         """Handle NET (network status) messages - no action needed."""
-        pass
 
     async def wait_for_initialization(self, timeout: float = 30.0) -> bool:
         """Wait for the initial data load to complete."""
         try:
             await asyncio.wait_for(self._initialized.wait(), timeout=timeout)
             return True
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return False

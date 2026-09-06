@@ -2,15 +2,15 @@
 
 import pytest
 
-from pyavedominaplus.const import STX, ETX, EOT, GS, RS
+from pyavedominaplus.const import EOT, ETX, GS, RS, STX
 from pyavedominaplus.protocol import (
     ProtocolDecoder,
     build_crc,
     decode_message,
-    encode_message,
     encode_light_command,
-    encode_shutter_command,
+    encode_message,
     encode_set_dimmer_level,
+    encode_shutter_command,
     encode_thermostat_set_point,
 )
 

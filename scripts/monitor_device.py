@@ -162,7 +162,7 @@ async def monitor(client: AVEDominaClient, device):
             event.clear()
             try:
                 await asyncio.wait_for(event.wait(), timeout=30.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
             if device.is_thermostat:
                 thermo = client.thermostats.get(device.id)

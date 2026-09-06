@@ -9,7 +9,7 @@ every complete run.
 """
 
 import time
-from typing import Callable
+from collections.abc import Callable
 
 from .const import (
     SHUTTER_STATUS_CLOSED,

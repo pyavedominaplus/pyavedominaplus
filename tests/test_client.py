@@ -1627,6 +1627,7 @@ class TestListenLoopWSMsgTypes:
     async def test_listen_loop_ws_closed_msg(self, mock_server):
         """Listen loop breaks on WSMsgType.CLOSED and emits ERROR status."""
         from unittest.mock import AsyncMock, MagicMock
+
         import aiohttp
 
         client = AVEDominaClient(
@@ -1672,6 +1673,7 @@ class TestListenLoopWSMsgTypes:
     async def test_listen_loop_ws_error_msg(self, mock_server):
         """Listen loop breaks on WSMsgType.ERROR."""
         from unittest.mock import AsyncMock, MagicMock
+
         import aiohttp
 
         client = AVEDominaClient(
@@ -1713,7 +1715,9 @@ class TestListenLoopWSMsgTypes:
     async def test_listen_loop_unknown_msg_type(self, mock_server):
         """Listen loop ignores unknown message types and continues."""
         from unittest.mock import AsyncMock, MagicMock
+
         import aiohttp
+
         from pyavedominaplus.protocol import encode_message
 
         client = AVEDominaClient(
@@ -1769,7 +1773,9 @@ class TestListenLoopWSMsgTypes:
     async def test_listen_loop_not_running(self, mock_server):
         """Listen loop breaks immediately when _running is False."""
         from unittest.mock import AsyncMock, MagicMock
+
         import aiohttp
+
         from pyavedominaplus.protocol import encode_message
 
         client = AVEDominaClient(
@@ -2052,7 +2058,9 @@ class TestAutoReconnect:
     async def test_connection_error_breaks_listen_loop(self, mock_server):
         """ConnectionError during message handling breaks the listen loop."""
         from unittest.mock import AsyncMock, MagicMock
+
         import aiohttp
+
         from pyavedominaplus.protocol import encode_message
 
         port = mock_server.port

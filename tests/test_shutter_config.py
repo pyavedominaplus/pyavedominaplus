@@ -3,7 +3,6 @@
 import json
 
 import pytest
-
 from shutter_config import (
     CONFIG_VERSION,
     ConfigError,

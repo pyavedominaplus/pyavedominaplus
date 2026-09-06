@@ -23,13 +23,14 @@ import statistics
 import sys
 from pathlib import Path
 
+from shutter_config import DEFAULT_CONFIG_PATH, ConfigError, TravelTimeConfig
+
 from pyavedominaplus import (
     DEFAULT_PHASE_TIMEOUT,
     AVEDominaClient,
     DominaDevice,
     measure_shutter_travel_times,
 )
-from shutter_config import DEFAULT_CONFIG_PATH, ConfigError, TravelTimeConfig
 
 
 async def main(

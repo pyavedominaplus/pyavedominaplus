@@ -92,7 +92,7 @@ async def pick_device(devices: list, category: str) -> object | None:
         d = devices[0]
         print(f"\n  Found 1 {category}: [{d.id}] {d.name}")
         ans = await ask(f"Use this device for {category} tests?")
-        if ans.startswith("s") or ans.startswith("n"):
+        if ans.startswith(("s", "n")):
             return None
         return d
     print(f"\n  Found {len(devices)} {category} devices:")
@@ -129,7 +129,7 @@ async def wait_for_update(
     unsub = client.register_update_callback(_on_update)
     try:
         await asyncio.wait_for(event.wait(), timeout=timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         pass
     unsub()
     return received

@@ -3,7 +3,7 @@
 import asyncio
 import time
 
-from aiohttp import web, WSMsgType
+from aiohttp import WSMsgType, web
 
 from pyavedominaplus.protocol import decode_message, encode_message
 
@@ -284,6 +284,20 @@ class MockDominaServer:
         self._app = None
         self._site = None
 
+    async def _broadcast(self, *messages: bytes) -> None:
+        """Send messages to every connected client, skipping ones that fail.
+
+        A client that has gone away mid-test must not turn into a test
+        failure, so send errors are dropped here rather than at each of the
+        call sites that broadcast.
+        """
+        for ws in list(self._clients):
+            try:
+                for msg in messages:
+                    await ws.send_bytes(msg)
+            except Exception:  # noqa: BLE001, S110 - a gone client is not a failure
+                pass
+
     async def send_update(
         self,
         command: str,
@@ -291,12 +305,7 @@ class MockDominaServer:
         records: list[list[str]] | None = None,
     ) -> None:
         """Send an update to all connected clients (simulates server-initiated events)."""
-        msg = encode_message(command.lower(), parameters, records)
-        for ws in list(self._clients):
-            try:
-                await ws.send_bytes(msg)
-            except Exception:
-                pass
+        await self._broadcast(encode_message(command.lower(), parameters, records))
 
     async def send_text_update(
         self,
@@ -310,7 +319,7 @@ class MockDominaServer:
         for ws in list(self._clients):
             try:
                 await ws.send_str(text)
-            except Exception:
+            except Exception:  # noqa: BLE001, S110 - a gone client is not a failure
                 pass
 
     async def _handler(self, request: web.Request) -> web.WebSocketResponse:
@@ -466,11 +475,7 @@ class MockDominaServer:
             "upd",
             parameters=["WS", str(device_type), device_id, str(value)],
         )
-        for client in self._clients:
-            try:
-                await client.send_bytes(upd)
-            except Exception:
-                pass
+        await self._broadcast(upd)
 
     async def _process_ebi(
         self, ws: web.WebSocketResponse, parameters: list[str]
@@ -686,13 +691,7 @@ class MockDominaServer:
             upd_season = encode_message(
                 "upd", parameters=["WT", "S", device_id, season]
             )
-            for client in self._clients:
-                try:
-                    await client.send_bytes(upd_tp)
-                    await client.send_bytes(upd_tm)
-                    await client.send_bytes(upd_season)
-                except Exception:
-                    pass
+            await self._broadcast(upd_tp, upd_tm, upd_season)
 
     async def _process_too(
         self, ws: web.WebSocketResponse, parameters: list[str]
@@ -715,8 +714,4 @@ class MockDominaServer:
         upd = encode_message(
             "upd", parameters=["WT", "Z", device_id, str(new_local_off)]
         )
-        for client in self._clients:
-            try:
-                await client.send_bytes(upd)
-            except Exception:
-                pass
+        await self._broadcast(upd)

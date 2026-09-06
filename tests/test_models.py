@@ -1,26 +1,26 @@
 """Tests for AVE DominaPlus data models."""
 
+from pyavedominaplus.const import (
+    APP_TYPE_LIGHT,
+    APP_TYPE_SCENARIO,
+    APP_TYPE_SHUTTER,
+    APP_TYPE_THERMOSTAT,
+    DEVICE_TYPE_DIMMER,
+    DEVICE_TYPE_ENERGY,
+    DEVICE_TYPE_LIGHT,
+    DEVICE_TYPE_LIGHT_22,
+    DEVICE_TYPE_SCENARIO,
+    DEVICE_TYPE_SHUTTER,
+    DEVICE_TYPE_SHUTTER_16,
+    DEVICE_TYPE_SHUTTER_19,
+    DEVICE_TYPE_THERMOSTAT,
+)
 from pyavedominaplus.models import (
     DominaArea,
     DominaDevice,
     DominaMapCommand,
     DominaThermostat,
     ThermoSeason,
-)
-from pyavedominaplus.const import (
-    DEVICE_TYPE_LIGHT,
-    DEVICE_TYPE_DIMMER,
-    DEVICE_TYPE_SHUTTER,
-    DEVICE_TYPE_THERMOSTAT,
-    DEVICE_TYPE_SCENARIO,
-    DEVICE_TYPE_ENERGY,
-    DEVICE_TYPE_LIGHT_22,
-    DEVICE_TYPE_SHUTTER_16,
-    DEVICE_TYPE_SHUTTER_19,
-    APP_TYPE_LIGHT,
-    APP_TYPE_SHUTTER,
-    APP_TYPE_THERMOSTAT,
-    APP_TYPE_SCENARIO,
 )
 
 

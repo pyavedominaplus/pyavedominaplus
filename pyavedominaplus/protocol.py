@@ -3,7 +3,7 @@
 import logging
 from typing import Any
 
-from .const import STX, ETX, EOT, GS, RS
+from .const import EOT, ETX, GS, RS, STX
 
 _LOGGER = logging.getLogger(__name__)
 
