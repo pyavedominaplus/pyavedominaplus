@@ -113,4 +113,4 @@ __all__ = [
     "measure_shutter_travel_times",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
